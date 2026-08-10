@@ -2,8 +2,6 @@
 
 Apple Vision hand, body, and face tracking to OSC for macOS.
 
-![Moveo Tracker](docs/moveo-tracker-v030-final.png)
-
 ## Use
 
 1. [Download the latest release](https://github.com/jpjullin/moveo-tracker/releases/latest).
@@ -17,5 +15,3 @@ The OSC destination and addresses are always visible below the camera.
 ```sh
 bash scripts/package-app.sh
 ```
-
-Made by [@jpjullin](https://github.com/jpjullin/moveo-tracker).
