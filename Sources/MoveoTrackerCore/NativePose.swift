@@ -39,7 +39,8 @@ public struct NativePoseDetection: Equatable, Sendable {
 public enum BodyPoseMapper {
     public static func detection(
         from observation: VNHumanBodyPoseObservation,
-        minimumConfidence: Float
+        minimumConfidence: Float,
+        regionOfInterest: CGRect = NormalizedRegionGeometry.fullImage
     ) throws -> NativePoseDetection? {
         let points = try observation.recognizedPoints(.all)
         let anchors: [VNHumanBodyPoseObservation.JointName] = [.root, .neck, .nose]
@@ -55,9 +56,13 @@ public enum BodyPoseMapper {
             }
             confidenceTotal += point.confidence
             confidenceCount += 1
+            let localized = NormalizedRegionGeometry.localPoint(
+                point.location,
+                in: regionOfInterest
+            )
             return NormalizedLandmark(
-                x: min(1, max(0, Float(point.location.x))),
-                y: min(1, max(0, Float(point.location.y))),
+                x: Float(localized.x),
+                y: Float(localized.y),
                 z: 0
             )
         }
@@ -90,12 +95,24 @@ public struct NativeFaceDetection: Equatable, Sendable {
 public enum FacePoseMapper {
     public static let landmarkCount = 80
 
-    public static func detection(from observation: VNFaceObservation) -> NativeFaceDetection {
+    public static func detection(
+        from observation: VNFaceObservation,
+        regionOfInterest: CGRect = NormalizedRegionGeometry.fullImage
+    ) -> NativeFaceDetection {
         var points: [NormalizedLandmark] = []
         var connections: [HandJointConnection] = []
-        let bounds = observation.boundingBox
+        let imageBounds = observation.boundingBox
+        let bounds = NormalizedRegionGeometry.localRect(
+            imageBounds,
+            in: regionOfInterest
+        )
 
-        func append(_ region: VNFaceLandmarkRegion2D?, count: Int, closed: Bool) {
+        func append(
+            _ region: VNFaceLandmarkRegion2D?,
+            count: Int,
+            closed: Bool,
+            connectsPoints: Bool = true
+        ) {
             let start = points.count
             if let region, region.pointCount > 0 {
                 let source = (0..<region.pointCount).map { region.normalizedPoints[$0] }
@@ -113,11 +130,17 @@ public enum FacePoseMapper {
                     let fraction = position - CGFloat(lower)
                     let x = source[lower].x + (source[upper].x - source[lower].x) * fraction
                     let y = source[lower].y + (source[upper].y - source[lower].y) * fraction
-                    let imageX = Float(bounds.minX + x * bounds.width)
-                    let imageY = Float(bounds.minY + y * bounds.height)
+                    let imagePoint = CGPoint(
+                        x: imageBounds.minX + x * imageBounds.width,
+                        y: imageBounds.minY + y * imageBounds.height
+                    )
+                    let localized = NormalizedRegionGeometry.localPoint(
+                        imagePoint,
+                        in: regionOfInterest
+                    )
                     points.append(NormalizedLandmark(
-                        x: min(1, max(0, imageX)),
-                        y: min(1, max(0, imageY)),
+                        x: Float(localized.x),
+                        y: Float(localized.y),
                         z: 0
                     ))
                 }
@@ -127,7 +150,7 @@ public enum FacePoseMapper {
                     count: count
                 ))
             }
-            if count > 1 {
+            if connectsPoints, count > 1 {
                 for index in 0..<(count - 1) {
                     connections.append(.init(start + index, start + index + 1))
                 }
@@ -143,9 +166,9 @@ public enum FacePoseMapper {
             append(landmarks.rightEye, count: 8, closed: true)
             append(landmarks.leftEyebrow, count: 5, closed: false)
             append(landmarks.rightEyebrow, count: 5, closed: false)
-            append(landmarks.nose, count: 9, closed: false)
+            append(landmarks.nose, count: 9, closed: true)
             append(landmarks.noseCrest, count: 3, closed: false)
-            append(landmarks.medianLine, count: 3, closed: false)
+            append(landmarks.medianLine, count: 3, closed: false, connectsPoints: false)
             append(landmarks.outerLips, count: 12, closed: true)
             append(landmarks.innerLips, count: 8, closed: true)
             append(landmarks.leftPupil, count: 1, closed: false)

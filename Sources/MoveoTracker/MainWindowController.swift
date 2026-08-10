@@ -48,7 +48,6 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     private let statusDot = NSView()
 
     private let stateValue = NSTextField(labelWithString: "Idle")
-    private let cameraValue = NSTextField(labelWithString: "None")
     private let detectionsValue = NSTextField(labelWithString: "0")
     private let fpsValue = NSTextField(labelWithString: "0.0 fps")
     private let inferenceValue = NSTextField(labelWithString: "0.0 ms")
@@ -81,13 +80,14 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.backgroundColor = .windowBackgroundColor
-        window.minSize = NSSize(width: 900, height: 500)
+        window.minSize = NSSize(width: 900, height: 510)
         window.center()
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         buildInterface()
         applySettingsToControls()
+        fitWindowHeightToPreview(animated: false)
     }
 
     required init?(coder: NSCoder) {
@@ -96,6 +96,8 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        fitWindowHeightToPreview(animated: false)
         updatePreviewVisibility()
     }
 
@@ -179,7 +181,6 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         statusDot.layer?.backgroundColor = (!status.error.isEmpty
             ? NSColor.systemRed
             : (status.isTracking ? NSColor.systemGreen : NSColor.tertiaryLabelColor)).cgColor
-        cameraValue.stringValue = status.camera
         detectionsValue.stringValue = "\(status.detectionCount) \(settings.trackingMode.subjectLabel)"
         fpsValue.stringValue = String(format: "%.1f fps", status.trackingFPS)
         inferenceValue.stringValue = String(format: "%.1f ms", status.inferenceMilliseconds)
@@ -220,24 +221,23 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         hideButton.target = self
         hideButton.action = #selector(hideWindow(_:))
         hideButton.bezelStyle = .rounded
-        hideButton.controlSize = .small
+        hideButton.controlSize = .regular
+        hideButton.font = .systemFont(ofSize: 12, weight: .medium)
+        hideButton.widthAnchor.constraint(equalToConstant: 72).isActive = true
         quitButton.target = self
         quitButton.action = #selector(quitApplication(_:))
         quitButton.bezelStyle = .rounded
-        quitButton.controlSize = .small
+        quitButton.controlSize = .regular
+        quitButton.font = .systemFont(ofSize: 12, weight: .medium)
         quitButton.contentTintColor = .systemRed
-        let header = horizontal([
-            appMark(),
-            titleBlock,
-            NSView(),
-            hideButton,
-            quitButton
-        ], spacing: 7)
+        quitButton.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        let header = horizontal([appMark(), titleBlock, NSView()], spacing: 7)
 
         cameraPopup.target = self
         cameraPopup.action = #selector(controlsChanged(_:))
         cameraPopup.controlSize = .regular
         cameraPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        cameraPopup.widthAnchor.constraint(equalToConstant: 308).isActive = true
 
         let refreshButton = NSButton(
             image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh cameras")
@@ -257,7 +257,8 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         trackingButton.font = .systemFont(ofSize: 13, weight: .semibold)
         trackingButton.bezelColor = .controlAccentColor
         trackingButton.contentTintColor = .white
-        trackingButton.widthAnchor.constraint(equalToConstant: 128).isActive = true
+        trackingButton.widthAnchor.constraint(equalToConstant: 176).isActive = true
+        trackingButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
         let cameraRow = horizontal([cameraPopup, refreshButton], spacing: 6)
 
@@ -268,16 +269,16 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         modeControl.action = #selector(controlsChanged(_:))
         modeControl.controlSize = .regular
         modeControl.segmentStyle = .rounded
-        modeControl.setWidth(92, forSegment: 0)
-        modeControl.setWidth(92, forSegment: 1)
-        modeControl.setWidth(92, forSegment: 2)
+        for segment in 0..<modeControl.segmentCount {
+            modeControl.setWidth(344 / CGFloat(modeControl.segmentCount), forSegment: segment)
+        }
         subjectsControl.target = self
         subjectsControl.action = #selector(controlsChanged(_:))
         subjectsControl.controlSize = .regular
         subjectsControl.segmentStyle = .rounded
-        subjectsControl.setWidth(38, forSegment: 0)
-        subjectsControl.setWidth(38, forSegment: 1)
-        subjectsControl.setWidth(76, forSegment: 2)
+        for segment in 0..<subjectsControl.segmentCount {
+            subjectsControl.setWidth(198 / CGFloat(subjectsControl.segmentCount), forSegment: segment)
+        }
         presetPopup.action = #selector(presetChanged(_:))
         for popup in [cadencePopup, resolutionPopup] {
             popup.action = #selector(controlsChanged(_:))
@@ -373,8 +374,6 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             compactStat("RAM", value: processRAMValue),
             compactStat("Dropped", value: dropsValue)
         ], spacing: 10)
-        cameraValue.font = .systemFont(ofSize: 10.5)
-        cameraValue.textColor = .secondaryLabelColor
         oscValue.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
         oscAddressesValue.font = .monospacedSystemFont(ofSize: 9.5, weight: .regular)
         oscAddressesValue.textColor = .secondaryLabelColor
@@ -385,6 +384,11 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         let liveContent = vertical([resourceRow, liveMainRow], spacing: 6)
         liveMainRow.widthAnchor.constraint(equalTo: liveContent.widthAnchor).isActive = true
         let livePanel = section(title: "Live", content: liveContent)
+        livePanel.setContentHuggingPriority(.required, for: .vertical)
+        livePanel.setContentCompressionResistancePriority(.required, for: .vertical)
+        let livePanelHeight = livePanel.heightAnchor.constraint(equalToConstant: 80)
+        livePanelHeight.priority = .init(999)
+        livePanelHeight.isActive = true
 
         errorLabel.textColor = .systemRed
         errorLabel.font = .systemFont(ofSize: 11)
@@ -404,18 +408,32 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         release.font = .systemFont(ofSize: 9.5)
         let footer = horizontal([creditButton, NSView(), release], spacing: 6)
 
+        let trackingActionRow = NSView()
+        trackingButton.translatesAutoresizingMaskIntoConstraints = false
+        trackingActionRow.addSubview(trackingButton)
+        NSLayoutConstraint.activate([
+            trackingButton.centerXAnchor.constraint(equalTo: trackingActionRow.centerXAnchor),
+            trackingButton.topAnchor.constraint(equalTo: trackingActionRow.topAnchor),
+            trackingButton.bottomAnchor.constraint(equalTo: trackingActionRow.bottomAnchor)
+        ])
+        let sidebarSpacer = NSView()
+        sidebarSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        sidebarSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
         let sidebarStack = NSStackView(views: [
             header,
+            trackingActionRow,
             section(title: "Camera", content: cameraRow),
             section(title: "Model", content: modeControl),
             section(title: "Tracking", content: trackingContent),
             section(title: "Output", content: outputContent),
+            sidebarSpacer,
             footer
         ])
         sidebarStack.orientation = .vertical
         sidebarStack.alignment = .width
-        sidebarStack.distribution = .equalSpacing
-        sidebarStack.spacing = 16
+        sidebarStack.distribution = .fill
+        sidebarStack.spacing = 14
         sidebarStack.translatesAutoresizingMaskIntoConstraints = false
 
         let sidebar = NSVisualEffectView()
@@ -425,8 +443,10 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(sidebarStack)
 
-        let workspaceHeader = horizontal([statusChip(), NSView(), trackingButton], spacing: 10)
+        let workspaceHeader = horizontal([statusChip(), NSView(), hideButton, quitButton], spacing: 8)
         let previewContainer = NSView()
+        previewContainer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        previewContainer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         previewView.translatesAutoresizingMaskIntoConstraints = false
         previewContainer.addSubview(previewView)
         previewAspectConstraint = previewView.widthAnchor.constraint(
@@ -448,7 +468,16 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             fillPreviewWidth,
             fillPreviewHeight
         ])
-        let workspace = vertical([workspaceHeader, previewContainer, livePanel, errorLabel], spacing: 10)
+        let workspaceSpacer = NSView()
+        workspaceSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        workspaceSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        let workspace = vertical([
+            workspaceHeader,
+            previewContainer,
+            livePanel,
+            errorLabel,
+            workspaceSpacer
+        ], spacing: 10)
         workspace.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(sidebar)
@@ -471,6 +500,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             workspace.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
 
             header.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
+            trackingActionRow.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
             cameraRow.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
             modeControl.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
             tuningRow.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
@@ -481,10 +511,11 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             footer.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
             workspaceHeader.widthAnchor.constraint(equalTo: workspace.widthAnchor),
             previewContainer.widthAnchor.constraint(equalTo: workspace.widthAnchor),
-            previewContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            previewContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
             metricRow.widthAnchor.constraint(equalToConstant: 342),
             livePanel.widthAnchor.constraint(equalTo: workspace.widthAnchor),
-            errorLabel.widthAnchor.constraint(equalTo: workspace.widthAnchor)
+            errorLabel.widthAnchor.constraint(equalTo: workspace.widthAnchor),
+            workspaceSpacer.widthAnchor.constraint(equalTo: workspace.widthAnchor)
         ])
     }
 
@@ -541,7 +572,8 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         previewView.update(
             rotation: settings.rotation,
             zoom: settings.zoom,
-            resolution: settings.resolution
+            resolution: settings.resolution,
+            clearsProcessedFrame: !latestStatus.isTracking
         )
         updatePreviewAspectRatio()
 
@@ -564,6 +596,22 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             multiplier: previewAspectRatio
         )
         previewAspectConstraint?.isActive = true
+    }
+
+    private func fitWindowHeightToPreview(animated: Bool = true) {
+        guard let window, let contentView = window.contentView else { return }
+        let workspaceWidth = max(1, contentView.bounds.width - 380 - 32)
+        let previewHeight = workspaceWidth / previewAspectRatio
+        let desiredHeight = max(window.minSize.height, previewHeight + 170)
+        let maximumHeight = window.screen?.visibleFrame.height ?? desiredHeight
+        let targetHeight = min(maximumHeight, desiredHeight)
+        guard abs(targetHeight - window.frame.height) > 1 else { return }
+
+        var frame = window.frame
+        let top = frame.maxY
+        frame.size.height = targetHeight
+        frame.origin.y = top - targetHeight
+        window.setFrame(frame, display: true, animate: animated)
     }
 
     private func updateOSCAddresses() {
@@ -593,6 +641,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     }
 
     @objc private func controlsChanged(_ sender: Any?) {
+        let previousResolution = settings.resolution
         if let slider = sender as? NSSlider, slider === rotationSlider {
             settings.rotation = rotationSlider.doubleValue
             settings.sanitize()
@@ -600,7 +649,8 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             previewView.update(
                 rotation: settings.rotation,
                 zoom: settings.zoom,
-                resolution: settings.resolution
+                resolution: settings.resolution,
+                clearsProcessedFrame: !latestStatus.isTracking
             )
             onSettingsChanged?(settings)
             return
@@ -612,7 +662,8 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             previewView.update(
                 rotation: settings.rotation,
                 zoom: settings.zoom,
-                resolution: settings.resolution
+                resolution: settings.resolution,
+                clearsProcessedFrame: !latestStatus.isTracking
             )
             onSettingsChanged?(settings)
             return
@@ -647,14 +698,21 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         settings.sanitize()
         settings.updatePresetFromTuning()
         applySettingsToControls()
+        if settings.resolution != previousResolution {
+            fitWindowHeightToPreview()
+        }
         onSettingsChanged?(settings)
     }
 
     @objc private func presetChanged(_ sender: Any?) {
         guard let title = presetPopup.titleOfSelectedItem,
               let preset = TrackingPreset(rawValue: title) else { return }
+        let previousResolution = settings.resolution
         settings.applyPreset(preset)
         applySettingsToControls()
+        if settings.resolution != previousResolution {
+            fitWindowHeightToPreview()
+        }
         onSettingsChanged?(settings)
     }
 
@@ -795,7 +853,6 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         sending.font = .systemFont(ofSize: 8.5, weight: .semibold)
         sending.textColor = .tertiaryLabelColor
         let stack = vertical([
-            compactStat("Camera", value: cameraValue),
             sending,
             oscValue,
             oscAddressesValue

@@ -84,6 +84,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var oscError = ""
     private let previewPublishingLock = NSLock()
     private let previewContext = CIContext(options: [.cacheIntermediates: false])
+    private let previewColorSpace = CGColorSpaceCreateDeviceRGB()
     private var previewPublishingEnabled = false
     private var pendingPreviewFrame: PreviewOverlayFrame?
     private var previewDeliveryScheduled = false
@@ -695,7 +696,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         let shouldPublishPreview = isPreviewPublishingEnabled()
             && previewFrameCadence.shouldProcess(
                 timestamp: now,
-                targetHz: min(30, settings.cadenceHz)
+                targetHz: settings.cadenceHz
             )
 
         do {
@@ -709,7 +710,8 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 let mapped = try limited((handRequest.results ?? []).compactMap {
                     try HandPoseMapper.landmarks(
                         from: $0,
-                        minimumConfidence: settings.minimumConfidence
+                        minimumConfidence: settings.minimumConfidence,
+                        regionOfInterest: roi
                     )
                 }
                 .sorted { palmX($0.0) < palmX($1.0) }
@@ -743,7 +745,8 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                     .compactMap {
                         try BodyPoseMapper.detection(
                             from: $0,
-                            minimumConfidence: settings.minimumConfidence
+                            minimumConfidence: settings.minimumConfidence,
+                            regionOfInterest: roi
                         )
                     }
                     .sorted { detectionCenterX($0.landmarks) < detectionCenterX($1.landmarks) }
@@ -759,7 +762,12 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 try handler.perform([faceRequest])
                 let detections = limited((faceRequest.results ?? [])
                     .sorted { $0.boundingBox.midX < $1.boundingBox.midX }
-                    .map { FacePoseMapper.detection(from: $0) }
+                    .map {
+                        FacePoseMapper.detection(
+                            from: $0,
+                            regionOfInterest: roi
+                        )
+                    }
                 )
                 sendFaces(detections)
                 detectionCount = detections.count
@@ -1023,20 +1031,19 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         let radians = CGFloat(-ImageRotation.normalizedDegrees(rotation) * .pi / 180)
         let dimensions = resolution.pixelDimensions
         let targetSize = CGSize(width: dimensions.width, height: dimensions.height)
-        // Bounding-box aspect fill leaves empty triangular corners after an
-        // arbitrary rotation. This cover scale keeps the exact Vision input
-        // filled at every angle, with the smallest unavoidable crop.
-        let coverScale = ImageRotation.minimumCoverScale(
+        // Keep rotation independent from the user's zoom. Using the zero-angle
+        // base scale intentionally leaves black corners at arbitrary angles.
+        let baseScale = ImageRotation.minimumCoverScale(
             source: source.extent.size,
             target: targetSize,
-            rotationDegrees: rotation
-        ) * 1.001
+            rotationDegrees: 0
+        )
         let transform = CGAffineTransform(
             translationX: targetSize.width / 2,
             y: targetSize.height / 2
         )
             .rotated(by: radians)
-            .scaledBy(x: coverScale, y: coverScale)
+            .scaledBy(x: baseScale, y: baseScale)
             .translatedBy(x: -source.extent.midX, y: -source.extent.midY)
         let processed = source.transformed(by: transform).cropped(
             to: CGRect(origin: .zero, size: targetSize)
@@ -1078,7 +1085,12 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             width: dimensions.width,
             height: dimensions.height
         )
-        return previewContext.createCGImage(visible, from: outputRect)
+        return previewContext.createCGImage(
+            visible,
+            from: outputRect,
+            format: .BGRA8,
+            colorSpace: previewColorSpace
+        )
     }
 
     private func checkCaptureHealth() {

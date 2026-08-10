@@ -86,6 +86,45 @@ public struct HandJointConnection: Equatable, Sendable {
     }
 }
 
+public enum NormalizedRegionGeometry {
+    public static let fullImage = CGRect(x: 0, y: 0, width: 1, height: 1)
+
+    public static func localPoint(_ point: CGPoint, in regionOfInterest: CGRect) -> CGPoint {
+        let region = validRegion(regionOfInterest)
+        return CGPoint(
+            x: clamp01((point.x - region.minX) / region.width),
+            y: clamp01((point.y - region.minY) / region.height)
+        )
+    }
+
+    public static func localRect(_ rect: CGRect, in regionOfInterest: CGRect) -> CGRect {
+        let minimum = localPoint(
+            CGPoint(x: rect.minX, y: rect.minY),
+            in: regionOfInterest
+        )
+        let maximum = localPoint(
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            in: regionOfInterest
+        )
+        return CGRect(
+            x: minimum.x,
+            y: minimum.y,
+            width: max(0, maximum.x - minimum.x),
+            height: max(0, maximum.y - minimum.y)
+        )
+    }
+
+    private static func validRegion(_ region: CGRect) -> CGRect {
+        let normalized = region.standardized.intersection(fullImage)
+        guard normalized.width > 0, normalized.height > 0 else { return fullImage }
+        return normalized
+    }
+
+    private static func clamp01(_ value: CGFloat) -> CGFloat {
+        min(1, max(0, value))
+    }
+}
+
 public enum HandSkeleton {
     // MediaPipe's canonical palm and five-finger connection topology.
     public static let connections: [HandJointConnection] = [
@@ -132,14 +171,14 @@ public enum PreviewCoverageGeometry {
         let radians = CGFloat(ImageRotation.normalizedDegrees(rotationDegrees) * .pi / 180)
         let rotatedWidth = abs(source.width * cos(radians)) + abs(source.height * sin(radians))
         let rotatedHeight = abs(source.width * sin(radians)) + abs(source.height * cos(radians))
-        let coverScale = ImageRotation.minimumCoverScale(
+        let baseScale = ImageRotation.minimumCoverScale(
             source: source,
             target: container,
-            rotationDegrees: rotationDegrees
+            rotationDegrees: 0
         )
         let safeZoom = zoom.isFinite ? max(1, zoom) : 1
-        let width = rotatedWidth * coverScale * safeZoom
-        let height = rotatedHeight * coverScale * safeZoom
+        let width = rotatedWidth * baseScale * safeZoom
+        let height = rotatedHeight * baseScale * safeZoom
         return CGRect(
             x: (container.width - width) / 2,
             y: (container.height - height) / 2,
@@ -184,7 +223,8 @@ public struct FrameCadence: Sendable {
 public enum HandPoseMapper {
     public static func landmarks(
         from observation: VNHumanHandPoseObservation,
-        minimumConfidence: Float
+        minimumConfidence: Float,
+        regionOfInterest: CGRect = NormalizedRegionGeometry.fullImage
     ) throws -> ([NormalizedLandmark], Float)? {
         let points = try observation.recognizedPoints(.all)
         guard let wrist = points[.wrist], wrist.confidence >= minimumConfidence else {
@@ -199,20 +239,27 @@ public enum HandPoseMapper {
             }
             confidenceTotal += point.confidence
             confidenceCount += 1
-            return landmark(fromROIRelativeLocation: point.location)
+            return landmark(
+                fromImageRelativeLocation: point.location,
+                regionOfInterest: regionOfInterest
+            )
         }
 
         guard mapped.count == 21 else { return nil }
         return (mapped, confidenceCount > 0 ? confidenceTotal / confidenceCount : 0)
     }
 
-    // Vision reports recognized points in normalized coordinates relative to
-    // the request's regionOfInterest. Keep that ROI-local normalization and
-    // lower-left Y origin for OSC consumers.
-    static func landmark(fromROIRelativeLocation location: CGPoint) -> NormalizedLandmark {
-        NormalizedLandmark(
-            x: clamp01(Float(location.x)),
-            y: clamp01(Float(location.y)),
+    // Vision reports recognized points in normalized input-image coordinates,
+    // even when a request ROI is active. Rebase them to the visible ROI so the
+    // preview and OSC output share the same lower-left normalized coordinates.
+    static func landmark(
+        fromImageRelativeLocation location: CGPoint,
+        regionOfInterest: CGRect = NormalizedRegionGeometry.fullImage
+    ) -> NormalizedLandmark {
+        let localized = NormalizedRegionGeometry.localPoint(location, in: regionOfInterest)
+        return NormalizedLandmark(
+            x: Float(localized.x),
+            y: Float(localized.y),
             z: 0
         )
     }

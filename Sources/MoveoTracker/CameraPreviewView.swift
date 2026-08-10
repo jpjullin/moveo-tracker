@@ -3,6 +3,48 @@ import AVFoundation
 import MoveoTrackerCore
 import QuartzCore
 
+private final class ResolutionBadgeView: NSView {
+    var title: String {
+        didSet {
+            setAccessibilityValue(title)
+            needsDisplay = true
+        }
+    }
+
+    init(title: String) {
+        self.title = title
+        super.init(frame: .zero)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("Capture resolution")
+        setAccessibilityValue(title)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.black.withAlphaComponent(0.62).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+
+        let attributed = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
+                .foregroundColor: NSColor.white
+            ]
+        )
+        let textSize = attributed.size()
+        attributed.draw(at: CGPoint(
+            x: floor((bounds.width - textSize.width) / 2),
+            y: floor((bounds.height - textSize.height) / 2)
+        ))
+    }
+}
+
 final class CameraPreviewView: NSView {
     private static let overlayColors: [NSColor] = [
         .systemCyan, .systemPink, .systemGreen, .systemOrange,
@@ -17,7 +59,7 @@ final class CameraPreviewView: NSView {
     private let viewportLayer = CALayer()
     private let previewLayer = AVCaptureVideoPreviewLayer()
     private let processedFrameLayer = CALayer()
-    private let resolutionLayer = CATextLayer()
+    private let resolutionBadge = ResolutionBadgeView(title: CaptureResolution.vga.displayName)
     private var overlayLayers: [OverlayLayers] = []
     private var displayedDetections: [PreviewDetection] = []
     private weak var captureSession: AVCaptureSession?
@@ -45,14 +87,14 @@ final class CameraPreviewView: NSView {
         viewportLayer.addSublayer(processedFrameLayer)
         ensureOverlayLayerCount(2)
         layer?.addSublayer(viewportLayer)
-        resolutionLayer.alignmentMode = .center
-        resolutionLayer.fontSize = 10
-        resolutionLayer.foregroundColor = NSColor.white.cgColor
-        resolutionLayer.backgroundColor = NSColor.black.withAlphaComponent(0.62).cgColor
-        resolutionLayer.cornerRadius = 6
-        resolutionLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        resolutionLayer.string = CaptureResolution.vga.displayName
-        layer?.addSublayer(resolutionLayer)
+        resolutionBadge.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(resolutionBadge)
+        NSLayoutConstraint.activate([
+            resolutionBadge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            resolutionBadge.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            resolutionBadge.widthAnchor.constraint(equalToConstant: 144),
+            resolutionBadge.heightAnchor.constraint(equalToConstant: 20)
+        ])
     }
 
     required init?(coder: NSCoder) {
@@ -68,7 +110,6 @@ final class CameraPreviewView: NSView {
         viewportLayer.frame = bounds
         viewportLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
         processedFrameLayer.frame = viewportLayer.bounds
-        resolutionLayer.frame = CGRect(x: 12, y: bounds.height - 32, width: 144, height: 20)
         previewLayer.bounds = CGRect(origin: .zero, size: sourceSize)
         previewLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
         for layers in overlayLayers {
@@ -91,12 +132,19 @@ final class CameraPreviewView: NSView {
         previewLayer.session = nil
     }
 
-    func update(rotation: Double, zoom: Double, resolution: CaptureResolution) {
+    func update(
+        rotation: Double,
+        zoom: Double,
+        resolution: CaptureResolution,
+        clearsProcessedFrame: Bool = true
+    ) {
         rotationDegrees = ImageRotation.normalizedDegrees(rotation)
         self.zoom = min(10, max(1, zoom))
         sourceAspectRatio = resolution.aspectRatio
-        resolutionLayer.string = resolution.displayName
-        updateProcessedFrame(nil)
+        resolutionBadge.title = resolution.displayName
+        if clearsProcessedFrame {
+            updateProcessedFrame(nil)
+        }
         needsLayout = true
     }
 

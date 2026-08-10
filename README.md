@@ -9,6 +9,9 @@ Apple Vision hand, body, and face tracking to OSC for macOS.
 3. Press **Start Tracking**.
 
 The OSC destination and addresses are always visible below the camera.
+Landmark coordinates and face bounds are normalized to the visible zoom region
+with a lower-left origin. Rotation never adds automatic zoom, so rotated frames
+may show black corners.
 
 ## Build
 

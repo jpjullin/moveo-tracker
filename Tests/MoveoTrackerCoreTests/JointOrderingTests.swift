@@ -101,12 +101,27 @@ final class JointOrderingTests: XCTestCase {
         XCTAssertEqual(settings.resolution, .low)
     }
 
-    func testVisionPointsRemainNormalizedWithinTheRequestROIWithLowerLeftY() {
+    func testVisionPointsAreRebasedIntoTheRequestROIWithLowerLeftY() {
         let point = HandPoseMapper.landmark(
-            fromROIRelativeLocation: CGPoint(x: 0.2, y: 0.75)
+            fromImageRelativeLocation: CGPoint(x: 0.4, y: 0.625),
+            regionOfInterest: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
         )
 
-        XCTAssertEqual(point, NormalizedLandmark(x: 0.2, y: 0.75, z: 0))
+        XCTAssertEqual(point.x, 0.3, accuracy: 0.000_1)
+        XCTAssertEqual(point.y, 0.75, accuracy: 0.000_1)
+        XCTAssertEqual(point.z, 0)
+    }
+
+    func testFaceBoundsAreRebasedForPreviewAndOSCAtZoom() {
+        let localized = NormalizedRegionGeometry.localRect(
+            CGRect(x: 0.4, y: 0.35, width: 0.2, height: 0.3),
+            in: CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+        )
+
+        XCTAssertEqual(localized.minX, 0.3, accuracy: 0.000_1)
+        XCTAssertEqual(localized.minY, 0.2, accuracy: 0.000_1)
+        XCTAssertEqual(localized.width, 0.4, accuracy: 0.000_1)
+        XCTAssertEqual(localized.height, 0.6, accuracy: 0.000_1)
     }
 
     func testCadenceDoesNotHalveWhenCameraTimestampsArriveSlightlyEarly() {
@@ -134,9 +149,14 @@ final class JointOrderingTests: XCTestCase {
         XCTAssertEqual(ImageRotation.normalizedDegrees(.infinity), 0)
     }
 
-    func testRotatedPreviewCoverRectFillsWithoutMargins() {
+    func testPreviewRotationKeepsTheZeroAngleScaleAndAllowsBlackCorners() {
         let container = CGSize(width: 640, height: 360)
         let source = CGSize(width: 640, height: 480)
+        let baseScale = ImageRotation.minimumCoverScale(
+            source: source,
+            target: container,
+            rotationDegrees: 0
+        )
 
         for rotation in stride(from: 0.0, through: 355.0, by: 5.0) {
             let rect = PreviewCoverageGeometry.coverRect(
@@ -145,28 +165,25 @@ final class JointOrderingTests: XCTestCase {
                 rotationDegrees: rotation,
                 zoom: 1
             )
-            XCTAssertGreaterThanOrEqual(rect.width, container.width - 0.001)
-            XCTAssertGreaterThanOrEqual(rect.height, container.height - 0.001)
             XCTAssertEqual(rect.midX, container.width / 2, accuracy: 0.001)
             XCTAssertEqual(rect.midY, container.height / 2, accuracy: 0.001)
 
-            let scale = ImageRotation.minimumCoverScale(
-                source: source,
-                target: container,
-                rotationDegrees: rotation
-            )
             let radians = CGFloat(rotation * .pi / 180)
             let cosine = abs(cos(radians))
             let sine = abs(sin(radians))
-            XCTAssertGreaterThanOrEqual(
-                source.width * scale + 0.001,
-                container.width * cosine + container.height * sine
-            )
-            XCTAssertGreaterThanOrEqual(
-                source.height * scale + 0.001,
-                container.width * sine + container.height * cosine
-            )
+            let rotatedWidth = source.width * cosine + source.height * sine
+            let rotatedHeight = source.width * sine + source.height * cosine
+            XCTAssertEqual(rect.width, rotatedWidth * baseScale, accuracy: 0.001)
+            XCTAssertEqual(rect.height, rotatedHeight * baseScale, accuracy: 0.001)
         }
+
+        let quarterTurn = PreviewCoverageGeometry.coverRect(
+            container: container,
+            source: source,
+            rotationDegrees: 90,
+            zoom: 1
+        )
+        XCTAssertLessThan(quarterTurn.width, container.width)
     }
 
     func testPreviewZoomExpandsTheSameCenteredCoverRect() {
