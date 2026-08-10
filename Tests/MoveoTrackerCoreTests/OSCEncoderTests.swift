@@ -21,12 +21,15 @@ final class OSCEncoderTests: XCTestCase {
         ])
     }
 
-    func testHandActiveContractAlwaysUsesTwoIntegerSlots() {
+    func testHandActiveContractKeepsTwoLegacySlotsAndExpandsForMoreHands() {
         XCTAssertEqual(OSCContract.handActiveArguments(handCount: -1), [.int32(0), .int32(0)])
         XCTAssertEqual(OSCContract.handActiveArguments(handCount: 0), [.int32(0), .int32(0)])
         XCTAssertEqual(OSCContract.handActiveArguments(handCount: 1), [.int32(1), .int32(0)])
         XCTAssertEqual(OSCContract.handActiveArguments(handCount: 2), [.int32(1), .int32(1)])
-        XCTAssertEqual(OSCContract.handActiveArguments(handCount: 8), [.int32(1), .int32(1)])
+        XCTAssertEqual(
+            OSCContract.handActiveArguments(handCount: 8),
+            Array(repeating: .int32(1), count: 8)
+        )
     }
 
     func testHandsActivePacketUsesPaddedStringsAndBigEndianInts() throws {

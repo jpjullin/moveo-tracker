@@ -94,8 +94,8 @@ public enum OSCContract {
     ]
 
     public static func handActiveArguments(handCount: Int) -> [OSCArgument] {
-        let activeCount = min(handSlotCount, max(0, handCount))
-        return (0..<handSlotCount).map { slot in
+        let activeCount = max(0, handCount)
+        return (0..<max(handSlotCount, activeCount)).map { slot in
             .int32(slot < activeCount ? 1 : 0)
         }
     }

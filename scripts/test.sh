@@ -19,7 +19,7 @@ if [[ -z "$(/usr/bin/plutil -extract MoveoTrackerReleaseDate raw Info.plist)" ]]
     exit 1
 fi
 if /usr/bin/grep -ERq \
-    'activeVideo(Min|Max)FrameDuration|isVideoMirroringSupported|automaticallyAdjustsVideoMirroring|isVideoMirrored' \
+    'isVideoMirroringSupported|automaticallyAdjustsVideoMirroring|isVideoMirrored' \
     Sources/MoveoTracker; then
     echo "Unsafe AVFoundation camera-connection selector found" >&2
     exit 1

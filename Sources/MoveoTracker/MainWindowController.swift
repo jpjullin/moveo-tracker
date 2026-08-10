@@ -63,6 +63,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     private let previewView: CameraPreviewView
     private var previewAspectConstraint: NSLayoutConstraint?
     private var previewAspectRatio: CGFloat = 4 / 3
+    private var windowFitIsScheduled = false
     private let metricsSampler = ProcessMetricsSampler()
 
     init(settings: AppSettings, previewSession: AVCaptureSession) {
@@ -594,6 +595,18 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             multiplier: previewAspectRatio
         )
         previewAspectConstraint?.isActive = true
+        scheduleWindowHeightFit()
+    }
+
+    private func scheduleWindowHeightFit(animated: Bool = true) {
+        guard !windowFitIsScheduled else { return }
+        windowFitIsScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.windowFitIsScheduled = false
+            self.window?.contentView?.layoutSubtreeIfNeeded()
+            self.fitWindowHeightToPreview(animated: animated)
+        }
     }
 
     private func fitWindowHeightToPreview(animated: Bool = true) {
@@ -616,7 +629,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         let addresses: String
         switch settings.trackingMode {
         case .hands:
-            let slots = settings.maxHands == 1 ? "0" : "{0,1}"
+            let slots = settings.isUnlimited ? "{0…7}" : (settings.maxHands == 1 ? "0" : "{0,1}")
             addresses = "/hand/\(slots)/landmarks   /hand/\(slots)/meta   /hands/active"
         case .body:
             let slots = settings.isUnlimited ? "{0…7}" : (settings.maxHands == 1 ? "0" : "{0,1}")
@@ -685,11 +698,10 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
            let resolution = CaptureResolution.allCases.first(where: { $0.displayName == title }) {
             settings.resolution = resolution
         }
-        if let field = sender as? NSTextField, field === zoomField {
-            settings.zoom = zoomField.doubleValue
-        } else {
-            settings.zoom = zoomSlider.doubleValue
-        }
+        // Preserve an exact value that is still being edited when another
+        // control (such as Quality) is changed. Slider changes return above
+        // after synchronizing this field.
+        settings.zoom = zoomField.doubleValue
         settings.rotation = rotationField.doubleValue
         settings.oscHost = hostField.stringValue
         settings.oscPort = portField.integerValue
@@ -697,7 +709,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         settings.updatePresetFromTuning()
         applySettingsToControls()
         if settings.resolution != previousResolution {
-            fitWindowHeightToPreview()
+            scheduleWindowHeightFit()
         }
         onSettingsChanged?(settings)
     }
@@ -709,7 +721,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         settings.applyPreset(preset)
         applySettingsToControls()
         if settings.resolution != previousResolution {
-            fitWindowHeightToPreview()
+            scheduleWindowHeightFit()
         }
         onSettingsChanged?(settings)
     }

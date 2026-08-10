@@ -4,20 +4,36 @@ import MoveoTrackerCore
 import QuartzCore
 
 private final class ResolutionBadgeView: NSView {
+    private let label: NSTextField
+
     var title: String {
         didSet {
+            label.stringValue = title
             setAccessibilityValue(title)
+            invalidateIntrinsicContentSize()
             needsDisplay = true
         }
     }
 
     init(title: String) {
         self.title = title
+        self.label = NSTextField(labelWithString: title)
         super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
         setAccessibilityLabel("Capture resolution")
         setAccessibilityValue(title)
+        label.font = .systemFont(ofSize: 10.5, weight: .medium)
+        label.textColor = .white
+        label.alignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10)
+        ])
     }
 
     required init?(coder: NSCoder) {
@@ -26,22 +42,13 @@ private final class ResolutionBadgeView: NSView {
 
     override var isFlipped: Bool { true }
 
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: ceil(label.intrinsicContentSize.width) + 20, height: 22)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.black.withAlphaComponent(0.62).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
-
-        let attributed = NSAttributedString(
-            string: title,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
-                .foregroundColor: NSColor.white
-            ]
-        )
-        let textSize = attributed.size()
-        attributed.draw(at: CGPoint(
-            x: floor((bounds.width - textSize.width) / 2),
-            y: floor((bounds.height - textSize.height) / 2)
-        ))
     }
 }
 
@@ -86,8 +93,7 @@ final class CameraPreviewView: NSView {
         NSLayoutConstraint.activate([
             resolutionBadge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             resolutionBadge.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            resolutionBadge.widthAnchor.constraint(equalToConstant: 144),
-            resolutionBadge.heightAnchor.constraint(equalToConstant: 20)
+            resolutionBadge.heightAnchor.constraint(equalToConstant: 22)
         ])
     }
 

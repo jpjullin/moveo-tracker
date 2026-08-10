@@ -1011,10 +1011,9 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 
     private func sendHands(_ detections: [HandDetection]) {
-        let exported = detections.prefix(OSCContract.handSlotCount)
         var messages: [(address: String, arguments: [OSCArgument])] = []
-        messages.reserveCapacity(exported.count * 2 + 1)
-        for (slot, detection) in exported.enumerated() {
+        messages.reserveCapacity(detections.count * 2 + 1)
+        for (slot, detection) in detections.enumerated() {
             guard detection.landmarks.count == 21 else { continue }
             messages.append((
                 address: "/hand/\(slot)/landmarks",
@@ -1027,7 +1026,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
         messages.append((
             address: "/hands/active",
-            arguments: OSCContract.handActiveArguments(handCount: exported.count)
+            arguments: OSCContract.handActiveArguments(handCount: detections.count)
         ))
         osc.sendBatch(messages, coalescingKey: "tracking-frame")
     }
@@ -1348,7 +1347,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
     private func exportedHandCount(_ detectionCount: Int) -> Int {
         guard settings.trackingMode == .hands else { return 0 }
-        return min(OSCContract.handSlotCount, max(0, detectionCount))
+        return max(0, detectionCount)
     }
 
     private func fail(_ message: String) {
