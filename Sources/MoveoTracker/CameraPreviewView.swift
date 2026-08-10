@@ -125,6 +125,10 @@ final class CameraPreviewView: NSView {
     func attach() {
         guard previewLayer.session == nil else { return }
         previewLayer.session = captureSession
+        // Attaching AVCaptureVideoPreviewLayer can reset its presentation
+        // geometry even though this view still retains the selected zoom and
+        // rotation. Force a layout pass so the stored transform is restored.
+        needsLayout = true
     }
 
     func detach() {

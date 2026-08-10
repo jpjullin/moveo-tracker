@@ -98,6 +98,9 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
+        // Reassert the live (possibly unsaved) settings after the preview was
+        // detached while hidden. This never reloads persistence or defaults.
+        applySettingsToControls()
         window?.contentView?.layoutSubtreeIfNeeded()
         fitWindowHeightToPreview(animated: false)
         updatePreviewVisibility()
@@ -748,6 +751,9 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     }
 
     @objc private func hideWindow(_ sender: Any?) {
+        // Commit an exact value still being edited before the window resigns
+        // its first responder, so Hide/Show preserves the same live zoom.
+        controlsChanged(nil)
         onHide?()
     }
 
