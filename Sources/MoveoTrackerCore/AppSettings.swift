@@ -79,6 +79,19 @@ public enum CaptureResolution: String, Codable, CaseIterable, Sendable {
         case .hd: return (1280, 720)
         }
     }
+
+    public var minimumCaptureDimensions: (width: Int, height: Int) {
+        switch self {
+        case .ultraLow, .low, .ultraLowWidescreen, .lowWidescreen:
+            return (640, 360)
+        case .widescreen:
+            return (960, 540)
+        case .vga, .highFourThree, .hd:
+            return (1280, 720)
+        }
+    }
+
+    public var preferredCaptureAspectRatio: CGFloat { 16 / 9 }
 }
 
 public struct AppSettings: Codable, Equatable, Sendable {

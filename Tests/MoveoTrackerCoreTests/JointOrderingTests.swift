@@ -38,6 +38,15 @@ final class JointOrderingTests: XCTestCase {
         XCTAssertEqual(CaptureResolution.widescreen.aspectRatio, 16 / 9)
         XCTAssertEqual(CaptureResolution.highFourThree.pixelDimensions.width, 960)
         XCTAssertEqual(CaptureResolution.lowWidescreen.pixelDimensions.height, 360)
+        XCTAssertEqual(CaptureResolution.ultraLow.minimumCaptureDimensions.width, 640)
+        XCTAssertEqual(CaptureResolution.ultraLow.minimumCaptureDimensions.height, 360)
+        XCTAssertEqual(CaptureResolution.low.minimumCaptureDimensions.width, 640)
+        XCTAssertEqual(CaptureResolution.low.minimumCaptureDimensions.height, 360)
+        XCTAssertEqual(CaptureResolution.ultraLowWidescreen.minimumCaptureDimensions.width, 640)
+        XCTAssertEqual(CaptureResolution.ultraLowWidescreen.minimumCaptureDimensions.height, 360)
+        XCTAssertEqual(CaptureResolution.vga.minimumCaptureDimensions.width, 1280)
+        XCTAssertEqual(CaptureResolution.vga.minimumCaptureDimensions.height, 720)
+        XCTAssertEqual(CaptureResolution.ultraLow.preferredCaptureAspectRatio, 16 / 9)
         XCTAssertEqual(CaptureResolution.allCases.count, 8)
     }
 

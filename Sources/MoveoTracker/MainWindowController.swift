@@ -64,6 +64,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     private var previewAspectConstraint: NSLayoutConstraint?
     private var previewAspectRatio: CGFloat = 4 / 3
     private var windowFitIsScheduled = false
+    private var workspaceChromeHeight: CGFloat = 200
     private let metricsSampler = ProcessMetricsSampler()
 
     init(settings: AppSettings, previewSession: AVCaptureSession) {
@@ -386,9 +387,6 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         let livePanel = section(title: "Live", content: liveContent)
         livePanel.setContentHuggingPriority(.required, for: .vertical)
         livePanel.setContentCompressionResistancePriority(.required, for: .vertical)
-        let livePanelHeight = livePanel.heightAnchor.constraint(equalToConstant: 80)
-        livePanelHeight.priority = .init(999)
-        livePanelHeight.isActive = true
 
         errorLabel.textColor = .systemRed
         errorLabel.font = .systemFont(ofSize: 11)
@@ -517,6 +515,11 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             errorLabel.widthAnchor.constraint(equalTo: workspace.widthAnchor),
             workspaceSpacer.widthAnchor.constraint(equalTo: workspace.widthAnchor)
         ])
+        contentView.layoutSubtreeIfNeeded()
+        workspaceChromeHeight = 38 + 20
+            + workspaceHeader.fittingSize.height
+            + livePanel.fittingSize.height
+            + workspace.spacing * 3
     }
 
     private func configurePopup(_ popup: NSPopUpButton, values: [String]) {
@@ -613,7 +616,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         guard let window, let contentView = window.contentView else { return }
         let workspaceWidth = max(1, contentView.bounds.width - 380 - 32)
         let previewHeight = workspaceWidth / previewAspectRatio
-        let desiredHeight = max(window.minSize.height, previewHeight + 170)
+        let desiredHeight = max(window.minSize.height, previewHeight + workspaceChromeHeight)
         let maximumHeight = window.screen?.visibleFrame.height ?? desiredHeight
         let targetHeight = min(maximumHeight, desiredHeight)
         guard abs(targetHeight - window.frame.height) > 1 else { return }

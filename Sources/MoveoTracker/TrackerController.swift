@@ -653,12 +653,18 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         resolution: CaptureResolution,
         targetHz: Double
     ) -> AVCaptureDevice.Format? {
-        let target = resolution.pixelDimensions
-        let targetAspect = Double(target.width) / Double(target.height)
+        let minimumCapture = resolution.minimumCaptureDimensions
+        let targetAspect = Double(resolution.preferredCaptureAspectRatio)
         var candidates = camera.formats.compactMap { format -> CaptureFormatCandidate? in
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             guard dimensions.width > 0, dimensions.height > 0 else { return nil }
-            let aspect = Double(dimensions.width) / Double(dimensions.height)
+            let presentation = CMVideoFormatDescriptionGetPresentationDimensions(
+                format.formatDescription,
+                usePixelAspectRatio: true,
+                useCleanAperture: true
+            )
+            guard presentation.width > 0, presentation.height > 0 else { return nil }
+            let aspect = Double(presentation.width / presentation.height)
             let ranges = format.videoSupportedFrameRateRanges
             guard !ranges.isEmpty else { return nil }
             let effectiveRate = ranges.map { range in
@@ -676,7 +682,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         guard !candidates.isEmpty else { return nil }
 
         let covering = candidates.filter {
-            Int($0.width) >= target.width && Int($0.height) >= target.height
+            Int($0.width) >= minimumCapture.width && Int($0.height) >= minimumCapture.height
         }
         if !covering.isEmpty { candidates = covering }
 

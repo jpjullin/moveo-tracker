@@ -84,7 +84,9 @@ final class CameraPreviewView: NSView {
         layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.65).cgColor
         layer?.masksToBounds = true
         viewportLayer.masksToBounds = true
-        previewLayer.videoGravity = .resizeAspect
+        // Fill the selected aspect ratio with a uniform crop when the camera's
+        // native mode differs, matching the crop used for Vision processing.
+        previewLayer.videoGravity = .resizeAspectFill
         viewportLayer.addSublayer(previewLayer)
         ensureOverlayLayerCount(2)
         layer?.addSublayer(viewportLayer)
