@@ -1,6 +1,6 @@
 import Vision
 import XCTest
-@testable import HandVisionCore
+@testable import MoveoTrackerCore
 
 final class JointOrderingTests: XCTestCase {
     func testMediaPipeCompatibleJointOrdering() {
@@ -13,6 +13,32 @@ final class JointOrderingTests: XCTestCase {
             .ringMCP, .ringPIP, .ringDIP, .ringTip,
             .littleMCP, .littlePIP, .littleDIP, .littleTip
         ])
+    }
+
+    func testNativeBodyAndFaceContractsStayStable() {
+        XCTAssertEqual(BodyJointMap.visionOrder.count, 19)
+        XCTAssertEqual(BodyJointMap.visionOrder.first, .nose)
+        XCTAssertEqual(BodyJointMap.visionOrder.last, .leftEar)
+        XCTAssertTrue(BodySkeleton.connections.allSatisfy {
+            BodyJointMap.visionOrder.indices.contains($0.start)
+                && BodyJointMap.visionOrder.indices.contains($0.end)
+        })
+        XCTAssertEqual(FacePoseMapper.landmarkCount, 80)
+    }
+
+    func testCaptureResolutionLabelsShowExactPixelDimensions() {
+        XCTAssertEqual(CaptureResolution.ultraLow.displayName, "160 × 120 (4:3)")
+        XCTAssertEqual(CaptureResolution.low.displayName, "320 × 240 (4:3)")
+        XCTAssertEqual(CaptureResolution.vga.displayName, "640 × 480 (4:3)")
+        XCTAssertEqual(CaptureResolution.highFourThree.displayName, "960 × 720 (4:3)")
+        XCTAssertEqual(CaptureResolution.ultraLowWidescreen.displayName, "320 × 180 (16:9)")
+        XCTAssertEqual(CaptureResolution.lowWidescreen.displayName, "640 × 360 (16:9)")
+        XCTAssertEqual(CaptureResolution.widescreen.displayName, "960 × 540 (16:9)")
+        XCTAssertEqual(CaptureResolution.hd.displayName, "1280 × 720 (16:9)")
+        XCTAssertEqual(CaptureResolution.widescreen.aspectRatio, 16 / 9)
+        XCTAssertEqual(CaptureResolution.highFourThree.pixelDimensions.width, 960)
+        XCTAssertEqual(CaptureResolution.lowWidescreen.pixelDimensions.height, 360)
+        XCTAssertEqual(CaptureResolution.allCases.count, 8)
     }
 
     func testSettingsAreBoundedToSupportedValues() {
@@ -34,6 +60,18 @@ final class JointOrderingTests: XCTestCase {
         XCTAssertEqual(settings.oscHost, "127.0.0.1")
         XCTAssertEqual(settings.oscPort, 65_535)
         XCTAssertEqual(settings.minimumConfidence, 0)
+    }
+
+    func testUnlimitedDetectionLimitIsPreserved() {
+        var settings = AppSettings(maxHands: AppSettings.unlimited)
+        settings.sanitize()
+
+        XCTAssertTrue(settings.isUnlimited)
+        XCTAssertNil(settings.maximumDetectionCount)
+        XCTAssertEqual(settings.maximumHandRequestCount, AppSettings.unlimitedHandRequestLimit)
+
+        settings.updatePresetFromTuning()
+        XCTAssertEqual(settings.preset, .custom)
     }
 
     func testBalancedPresetMatchesPrototypeDefaults() {
@@ -96,8 +134,88 @@ final class JointOrderingTests: XCTestCase {
         XCTAssertEqual(ImageRotation.normalizedDegrees(.infinity), 0)
     }
 
+    func testRotatedPreviewCoverRectFillsWithoutMargins() {
+        let container = CGSize(width: 640, height: 360)
+        let source = CGSize(width: 640, height: 480)
+
+        for rotation in stride(from: 0.0, through: 355.0, by: 5.0) {
+            let rect = PreviewCoverageGeometry.coverRect(
+                container: container,
+                source: source,
+                rotationDegrees: rotation,
+                zoom: 1
+            )
+            XCTAssertGreaterThanOrEqual(rect.width, container.width - 0.001)
+            XCTAssertGreaterThanOrEqual(rect.height, container.height - 0.001)
+            XCTAssertEqual(rect.midX, container.width / 2, accuracy: 0.001)
+            XCTAssertEqual(rect.midY, container.height / 2, accuracy: 0.001)
+
+            let scale = ImageRotation.minimumCoverScale(
+                source: source,
+                target: container,
+                rotationDegrees: rotation
+            )
+            let radians = CGFloat(rotation * .pi / 180)
+            let cosine = abs(cos(radians))
+            let sine = abs(sin(radians))
+            XCTAssertGreaterThanOrEqual(
+                source.width * scale + 0.001,
+                container.width * cosine + container.height * sine
+            )
+            XCTAssertGreaterThanOrEqual(
+                source.height * scale + 0.001,
+                container.width * sine + container.height * cosine
+            )
+        }
+    }
+
+    func testPreviewZoomExpandsTheSameCenteredCoverRect() {
+        let normal = PreviewCoverageGeometry.coverRect(
+            container: CGSize(width: 640, height: 360),
+            source: CGSize(width: 640, height: 480),
+            rotationDegrees: 32,
+            zoom: 1
+        )
+        let zoomed = PreviewCoverageGeometry.coverRect(
+            container: CGSize(width: 640, height: 360),
+            source: CGSize(width: 640, height: 480),
+            rotationDegrees: 32,
+            zoom: 2
+        )
+
+        XCTAssertEqual(zoomed.width, normal.width * 2, accuracy: 0.001)
+        XCTAssertEqual(zoomed.height, normal.height * 2, accuracy: 0.001)
+        XCTAssertEqual(zoomed.midX, normal.midX, accuracy: 0.001)
+        XCTAssertEqual(zoomed.midY, normal.midY, accuracy: 0.001)
+    }
+
+    func testROILocalDetectionsMapToVisibleViewportAtAnyZoom() {
+        let viewport = CGSize(width: 640, height: 360)
+        let zoomedSource = PreviewCoverageGeometry.coverRect(
+            container: viewport,
+            source: viewport,
+            rotationDegrees: 0,
+            zoom: 3
+        )
+        let points = HandOverlayGeometry.points(
+            for: [
+                NormalizedLandmark(x: 0, y: 0),
+                NormalizedLandmark(x: 0.5, y: 0.5),
+                NormalizedLandmark(x: 1, y: 1)
+            ],
+            in: viewport
+        )
+
+        XCTAssertEqual(zoomedSource.width, viewport.width * 3)
+        XCTAssertEqual(points, [
+            CGPoint(x: 0, y: 0),
+            CGPoint(x: 320, y: 180),
+            CGPoint(x: 640, y: 360)
+        ])
+    }
+
     func testSettingsSaveLoadAndReset() throws {
-        let suiteName = "HandVisionCoreTests.\(UUID().uuidString)"
+        let suiteName = "MoveoTrackerCoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let persistence = SettingsPersistence(defaults: defaults)
@@ -137,8 +255,16 @@ final class JointOrderingTests: XCTestCase {
         """.utf8)
 
         let decoded = try JSONDecoder().decode(AppSettings.self, from: legacyJSON)
+        XCTAssertEqual(decoded.trackingMode, .hands)
         XCTAssertEqual(decoded.rotation, 90)
         XCTAssertEqual(ImageRotation.discreteQuarterTurns(decoded.rotation), 1)
+    }
+
+
+    func testTrackingModeRoundTripsWithSavedSettings() throws {
+        let settings = AppSettings(trackingMode: .face)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(decoded.trackingMode, .face)
     }
 
     func testOverlayMapsROILocalLowerLeftCoordinatesIntoLayerSpace() {

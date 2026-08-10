@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import HandVisionCore
+import MoveoTrackerCore
 import Vision
 
 enum CameraFreeSelfTest {
@@ -15,6 +15,13 @@ enum CameraFreeSelfTest {
         }
         if HandJointMap.visionOrder.last != .littleTip {
             failures.append("joint 20 is not Vision little-finger tip")
+        }
+        if BodyJointMap.visionOrder.count != 19 || FacePoseMapper.landmarkCount != 80 {
+            failures.append("native body or face landmark contract changed")
+        }
+        if !OSCContract.addresses.contains("/bodies/active") ||
+            !OSCContract.addresses.contains("/faces/active") {
+            failures.append("native model OSC addresses are missing")
         }
 
         do {
@@ -64,9 +71,13 @@ enum CameraFreeSelfTest {
         if sanitized.maxHands != 2 || sanitized.cadenceHz != 1 || sanitized.zoom != 10 || sanitized.oscPort != 65_535 {
             failures.append("settings bounds are not enforced")
         }
+        let unlimited = AppSettings(maxHands: AppSettings.unlimited)
+        if !unlimited.isUnlimited || unlimited.maximumDetectionCount != nil {
+            failures.append("unlimited detection setting is not preserved")
+        }
 
         if failures.isEmpty {
-            print("{\"ok\":true,\"tests\":5,\"cameraRequired\":false}")
+            print("{\"ok\":true,\"tests\":8,\"cameraRequired\":false}")
             return 0
         }
         for failure in failures { fputs("self-test: \(failure)\n", stderr) }

@@ -8,4 +8,4 @@ cd "$PROJECT_DIR"
 /usr/bin/plutil -lint Info.plist
 swift build -c release
 
-echo "Release executable: $(swift build -c release --show-bin-path)/HandVisionNative"
+echo "Release executable: $(swift build -c release --show-bin-path)/MoveoTracker"

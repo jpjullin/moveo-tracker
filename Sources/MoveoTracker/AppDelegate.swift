@@ -1,5 +1,5 @@
 import AppKit
-import HandVisionCore
+import MoveoTrackerCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let persistence = SettingsPersistence()
@@ -15,9 +15,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quitCountdownTimer: Timer?
     private var quitConfirmationActive = false
     private var quitApproved = false
+    private var lastDiagnosticsSignature = ""
+    private var recoveryAttentionActive = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        let previousSessionWasInterrupted = Diagnostics.shared.beginSession()
 
         let settings = persistence.load()
         tracker = TrackerController(settings: settings)
@@ -30,12 +33,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tracker.refreshCameras()
         installWorkspaceObservers()
         showWindow(nil)
+        if previousSessionWasInterrupted {
+            createAndPresentDiagnosticsArchive()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
         workspaceObservers.removeAll()
         tracker.shutdown()
+        Diagnostics.shared.endSession()
     }
 
     func applicationDidHide(_ notification: Notification) {
@@ -84,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tracker.onStatus = { [weak self] status in
             self?.mainWindowController.update(status: status)
             self?.updateMenu(status: status)
+            self?.recordDiagnostics(status: status)
+            self?.showRecoveryIfNeeded(status: status)
         }
     }
 
@@ -92,9 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             button.image = NSImage(
                 systemSymbolName: "hand.raised.fill",
-                accessibilityDescription: "Hand Vision Native"
+                accessibilityDescription: "Moveo Tracker"
             )
-            button.toolTip = "Hand Vision Native"
+            button.toolTip = "Moveo Tracker"
         }
 
         let menu = NSMenu()
@@ -139,7 +148,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenuItem.title = "Tracking: \(status.state.lowercased())"
         startMenuItem.isEnabled = !status.isTracking
         stopMenuItem.isEnabled = status.isTracking
-        statusItem.button?.toolTip = "Hand Vision Native - \(status.state)"
+        statusItem.button?.toolTip = "Moveo Tracker - \(status.state)"
+    }
+
+    private func recordDiagnostics(status: TrackerStatus) {
+        let signature = "\(status.state)|\(status.error)"
+        guard signature != lastDiagnosticsSignature else { return }
+        lastDiagnosticsSignature = signature
+        let error = status.error.isEmpty ? "none" : status.error
+        Diagnostics.shared.record("Tracker state: \(status.state) | error: \(error)")
+    }
+
+    private func showRecoveryIfNeeded(status: TrackerStatus) {
+        let attentionStates = ["Waiting for camera", "Interrupted", "Recovering", "Error"]
+        let needsAttention = attentionStates.contains(status.state)
+        guard needsAttention else {
+            recoveryAttentionActive = false
+            return
+        }
+        guard !recoveryAttentionActive else { return }
+        recoveryAttentionActive = true
+        guard mainWindowController.window?.isVisible != true || NSApp.isHidden else { return }
+        showWindow(nil)
+    }
+
+    private func createAndPresentDiagnosticsArchive() {
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try Diagnostics.shared.makeArchive() }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Moveo Tracker may have crashed"
+                switch result {
+                case .success(let archiveURL):
+                    alert.informativeText = "The previous session did not close normally. Please send the diagnostic ZIP to \(Diagnostics.supportEmail).\n\n\(archiveURL.path)"
+                    alert.addButton(withTitle: "Show ZIP")
+                    alert.addButton(withTitle: "Copy Email")
+                    alert.addButton(withTitle: "Dismiss")
+                    guard let window = self.mainWindowController.window else { return }
+                    alert.beginSheetModal(for: window) { response in
+                        if response == .alertFirstButtonReturn {
+                            NSWorkspace.shared.activateFileViewerSelecting([archiveURL])
+                        } else if response == .alertSecondButtonReturn {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(Diagnostics.supportEmail, forType: .string)
+                        }
+                    }
+                case .failure(let error):
+                    alert.informativeText = "The previous session did not close normally. A diagnostic ZIP could not be created (\(error.localizedDescription)). Please contact \(Diagnostics.supportEmail)."
+                    alert.addButton(withTitle: "Copy Email")
+                    alert.addButton(withTitle: "Dismiss")
+                    guard let window = self.mainWindowController.window else { return }
+                    alert.beginSheetModal(for: window) { response in
+                        if response == .alertFirstButtonReturn {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(Diagnostics.supportEmail, forType: .string)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @objc private func showWindow(_ sender: Any?) {
@@ -184,7 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Quit Hand Vision Native?"
+        alert.messageText = "Quit Moveo Tracker?"
         alert.informativeText = "Tracking and OSC output will stop when the app quits."
         let quitButton = alert.addButton(withTitle: "Quit in 5")
         quitButton.isEnabled = false

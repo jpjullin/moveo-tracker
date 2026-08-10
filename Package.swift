@@ -3,23 +3,23 @@
 import PackageDescription
 
 let package = Package(
-    name: "HandVisionNative",
+    name: "MoveoTracker",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "HandVisionNative", targets: ["HandVisionNative"])
+        .executable(name: "MoveoTracker", targets: ["MoveoTracker"])
     ],
     targets: [
         .target(
-            name: "HandVisionCore",
+            name: "MoveoTrackerCore",
             linkerSettings: [
                 .linkedFramework("Vision")
             ]
         ),
         .executableTarget(
-            name: "HandVisionNative",
-            dependencies: ["HandVisionCore"],
+            name: "MoveoTracker",
+            dependencies: ["MoveoTrackerCore"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
@@ -32,8 +32,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "HandVisionCoreTests",
-            dependencies: ["HandVisionCore"]
+            name: "MoveoTrackerCoreTests",
+            dependencies: ["MoveoTrackerCore"]
         )
     ]
 )

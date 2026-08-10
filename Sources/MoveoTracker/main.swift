@@ -10,7 +10,7 @@ if CommandLine.arguments.contains("--self-test") {
 // per-user advisory lock open for the entire process so only one camera/OSC
 // owner can run. flock is released by macOS even if the process crashes.
 let instanceLockPath = (NSTemporaryDirectory() as NSString)
-    .appendingPathComponent("site.posedtx.hand-vision-native.\(getuid()).lock")
+    .appendingPathComponent("site.posedtx.moveo-tracker.\(getuid()).lock")
 let instanceLockFileDescriptor = Darwin.open(
     instanceLockPath,
     O_CREAT | O_RDWR,
@@ -19,7 +19,7 @@ let instanceLockFileDescriptor = Darwin.open(
 if instanceLockFileDescriptor >= 0,
    flock(instanceLockFileDescriptor, LOCK_EX | LOCK_NB) != 0 {
     NSRunningApplication.runningApplications(
-        withBundleIdentifier: "site.posedtx.hand-vision-native"
+        withBundleIdentifier: "site.posedtx.moveo-tracker"
     )
     .first(where: { $0.processIdentifier != getpid() })?
     .activate(options: [.activateAllWindows])

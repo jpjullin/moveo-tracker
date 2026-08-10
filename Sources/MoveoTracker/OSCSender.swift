@@ -1,9 +1,9 @@
 import Foundation
-import HandVisionCore
+import MoveoTrackerCore
 import Network
 
 final class OSCSender {
-    private let queue = DispatchQueue(label: "site.posedtx.hand-vision-native.osc")
+    private let queue = DispatchQueue(label: "site.posedtx.moveo-tracker.osc")
     private var connection: NWConnection?
     private var reconnectWorkItem: DispatchWorkItem?
     private var endpoint = ""

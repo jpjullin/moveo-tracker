@@ -119,6 +119,36 @@ public enum HandOverlayGeometry {
     }
 }
 
+public enum PreviewCoverageGeometry {
+    public static func coverRect(
+        container: CGSize,
+        source: CGSize,
+        rotationDegrees: Double,
+        zoom: Double
+    ) -> CGRect {
+        guard container.width > 0, container.height > 0,
+              source.width > 0, source.height > 0 else { return .zero }
+
+        let radians = CGFloat(ImageRotation.normalizedDegrees(rotationDegrees) * .pi / 180)
+        let rotatedWidth = abs(source.width * cos(radians)) + abs(source.height * sin(radians))
+        let rotatedHeight = abs(source.width * sin(radians)) + abs(source.height * cos(radians))
+        let coverScale = ImageRotation.minimumCoverScale(
+            source: source,
+            target: container,
+            rotationDegrees: rotationDegrees
+        )
+        let safeZoom = zoom.isFinite ? max(1, zoom) : 1
+        let width = rotatedWidth * coverScale * safeZoom
+        let height = rotatedHeight * coverScale * safeZoom
+        return CGRect(
+            x: (container.width - width) / 2,
+            y: (container.height - height) / 2,
+            width: width,
+            height: height
+        )
+    }
+}
+
 public struct FrameCadence: Sendable {
     private var nextDeadline = -Double.infinity
 

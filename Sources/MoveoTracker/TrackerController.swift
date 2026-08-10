@@ -2,7 +2,7 @@ import AVFoundation
 import CoreImage
 import CoreMedia
 import Foundation
-import HandVisionCore
+import MoveoTrackerCore
 import ImageIO
 import Vision
 
@@ -14,7 +14,7 @@ struct CameraChoice: Equatable {
 struct TrackerStatus: Equatable {
     var state: String = "Idle"
     var camera: String = "None"
-    var handCount: Int = 0
+    var detectionCount: Int = 0
     var trackingFPS: Double = 0
     var inferenceMilliseconds: Double = 0
     var droppedFrames: Int = 0
@@ -23,15 +23,21 @@ struct TrackerStatus: Equatable {
     var isTracking: Bool = false
 }
 
+struct PreviewDetection: Sendable {
+    var landmarks: [NormalizedLandmark]
+    var connections: [HandJointConnection]
+}
+
 struct PreviewOverlayFrame: Sendable {
-    var hands: [[NormalizedLandmark]]
+    var detections: [PreviewDetection]
     var sourceAspectRatio: CGFloat
+    var image: CGImage?
 }
 
 private struct TrackingHeartbeatSnapshot: Sendable {
     var appRunning = true
     var trackingActive = false
-    var handCount = 0
+    var detectionCount = 0
     var trackingFPS = 0.0
 }
 
@@ -42,16 +48,18 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     var previewSession: AVCaptureSession { session }
 
     private let inferenceQueue = DispatchQueue(
-        label: "site.posedtx.hand-vision-native.inference",
+        label: "site.posedtx.moveo-tracker.inference",
         qos: .userInitiated
     )
     private let heartbeatQueue = DispatchQueue(
-        label: "site.posedtx.hand-vision-native.heartbeat",
+        label: "site.posedtx.moveo-tracker.heartbeat",
         qos: .utility
     )
     private let session = AVCaptureSession()
     private var videoOutput: AVCaptureVideoDataOutput?
-    private let request = VNDetectHumanHandPoseRequest()
+    private let handRequest = VNDetectHumanHandPoseRequest()
+    private let bodyRequest = VNDetectHumanBodyPoseRequest()
+    private let faceRequest = VNDetectFaceLandmarksRequest()
     private let osc = OSCSender()
     private let metaCalculator = HandMetaCalculator()
     private var frameCadence = FrameCadence()
@@ -64,6 +72,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var heartbeatTimer: DispatchSourceTimer?
     private var fpsWindowStarted = ProcessInfo.processInfo.systemUptime
     private var fpsWindowFrames = 0
+    private var previewFrameCadence = FrameCadence()
     private var lastStatusPublish = -Double.infinity
     private var currentInput: AVCaptureDeviceInput?
     private var captureObservers: [NSObjectProtocol] = []
@@ -74,6 +83,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var trackingError = ""
     private var oscError = ""
     private let previewPublishingLock = NSLock()
+    private let previewContext = CIContext(options: [.cacheIntermediates: false])
     private var previewPublishingEnabled = false
     private var pendingPreviewFrame: PreviewOverlayFrame?
     private var previewDeliveryScheduled = false
@@ -85,6 +95,9 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private let cameraPermissionLock = NSLock()
     private var cameraPermissionRequestID: UInt64 = 0
     private var lastPreviewAspectRatio: CGFloat = 4 / 3
+    private let settingsUpdateLock = NSLock()
+    private var pendingSettings: AppSettings?
+    private var settingsUpdateScheduled = false
     private var shuttingDown = false
 
     init(settings: AppSettings) {
@@ -94,7 +107,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         self.status = TrackerStatus(oscDestination: "\(clean.oscHost):\(clean.oscPort)")
         super.init()
 
-        request.maximumHandCount = clean.maxHands
+        handRequest.maximumHandCount = clean.maximumHandRequestCount
         osc.configure(host: clean.oscHost, port: clean.oscPort)
         osc.onError = { [weak self] message in
             self?.inferenceQueue.async { [weak self] in
@@ -120,26 +133,60 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     func updateSettings(_ updated: AppSettings) {
         var clean = updated
         clean.sanitize()
+        settingsUpdateLock.lock()
+        pendingSettings = clean
+        let shouldSchedule = !settingsUpdateScheduled
+        if shouldSchedule { settingsUpdateScheduled = true }
+        settingsUpdateLock.unlock()
+        guard shouldSchedule else { return }
         inferenceQueue.async { [weak self] in
-            guard let self else { return }
-            let cadenceChanged = self.settings.cadenceHz != clean.cadenceHz
-            let needsRestart = self.trackingIntent.shouldRunCapture && (
-                self.settings.cameraID != clean.cameraID ||
-                self.settings.resolution != clean.resolution
+            self?.applyPendingSettings()
+        }
+    }
+
+    private func applyPendingSettings() {
+        settingsUpdateLock.lock()
+        let clean = pendingSettings
+        pendingSettings = nil
+        settingsUpdateLock.unlock()
+
+        if let clean, !shuttingDown {
+            let cadenceChanged = settings.cadenceHz != clean.cadenceHz
+            let modeChanged = settings.trackingMode != clean.trackingMode
+            let needsRestart = trackingIntent.shouldRunCapture && (
+                settings.cameraID != clean.cameraID ||
+                settings.resolution != clean.resolution
             )
-            self.settings = clean
-            self.request.maximumHandCount = clean.maxHands
-            self.status.oscDestination = "\(clean.oscHost):\(clean.oscPort)"
-            self.osc.configure(host: clean.oscHost, port: clean.oscPort)
+            settings = clean
+            handRequest.maximumHandCount = clean.maximumHandRequestCount
+            status.oscDestination = "\(clean.oscHost):\(clean.oscPort)"
+            osc.configure(host: clean.oscHost, port: clean.oscPort)
+
+            if modeChanged {
+                lossHysteresis.reset()
+                metaCalculator.reset()
+                status.detectionCount = 0
+                clearPreviewOverlay()
+                sendInactiveTrackingSubjects()
+                sendTrackingStatus(appRunning: true)
+            }
 
             if needsRestart {
-                self.rebuildCaptureSession(state: "Starting", message: "Applying camera settings.")
+                rebuildCaptureSession(state: "Starting", message: "Applying camera settings.")
             } else {
-                if cadenceChanged, self.trackingIntent.shouldRunCapture {
-                    self.frameCadence.reset()
+                if cadenceChanged, trackingIntent.shouldRunCapture {
+                    frameCadence.reset()
                 }
-                self.publishStatus()
+                publishStatus()
             }
+        }
+
+        settingsUpdateLock.lock()
+        let hasPendingSettings = pendingSettings != nil
+        if !hasPendingSettings { settingsUpdateScheduled = false }
+        settingsUpdateLock.unlock()
+        if hasPendingSettings {
+            inferenceQueue.async { [weak self] in self?.applyPendingSettings() }
         }
     }
 
@@ -204,10 +251,10 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             self.endTrackingActivity()
             self.status.state = "Sleeping"
             self.status.isTracking = true
-            self.status.handCount = 0
+            self.status.detectionCount = 0
             self.status.trackingFPS = 0
             self.clearPreviewOverlay()
-            self.sendActiveHands([0, 0])
+            self.sendInactiveTrackingSubjects()
             self.publishStatus()
             self.sendTrackingStatus(appRunning: true)
         }
@@ -306,11 +353,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 self.endTrackingActivity()
                 self.status.state = "Waiting for camera"
                 self.status.isTracking = self.trackingIntent.isRequested
-                self.status.handCount = 0
+                self.status.detectionCount = 0
                 self.status.trackingFPS = 0
                 self.setTrackingError("The selected camera was disconnected. Tracking will resume if it reconnects.")
                 self.clearPreviewOverlay()
-                self.sendActiveHands([0, 0])
+                self.sendInactiveTrackingSubjects()
                 self.publishStatus()
                 self.sendTrackingStatus(appRunning: true)
             }
@@ -339,13 +386,13 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 self.captureInterrupted = true
                 self.captureWatchdog.captureStarted(at: ProcessInfo.processInfo.systemUptime)
                 self.status.state = "Interrupted"
-                self.status.handCount = 0
+                self.status.detectionCount = 0
                 self.status.trackingFPS = 0
                 self.setTrackingError("Camera capture was interrupted.")
                 self.lossHysteresis.reset()
                 self.metaCalculator.reset()
                 self.clearPreviewOverlay()
-                self.sendActiveHands([0, 0])
+                self.sendInactiveTrackingSubjects()
                 self.publishStatus()
                 self.sendTrackingStatus(appRunning: true)
             }
@@ -392,7 +439,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         if !session.isRunning { session.startRunning() }
         captureWatchdog.captureStarted(at: ProcessInfo.processInfo.systemUptime)
         status.state = "Resuming"
-        status.handCount = 0
+        status.detectionCount = 0
         status.trackingFPS = 0
         setTrackingError("Waiting for camera frames after interruption.")
         publishStatus()
@@ -462,8 +509,9 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             session.beginConfiguration()
             defer { session.commitConfiguration() }
 
-            let desiredPreset = settings.resolution.sessionPreset
-            session.sessionPreset = session.canSetSessionPreset(desiredPreset) ? desiredPreset : .medium
+            let desiredPreset = settings.resolution.sessionPresetsInPriorityOrder
+                .first(where: { session.canSetSessionPreset($0) })
+            session.sessionPreset = desiredPreset ?? .medium
 
             let input = try AVCaptureDeviceInput(device: camera)
             guard session.canAddInput(input) else {
@@ -474,6 +522,9 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
             let nextVideoOutput = AVCaptureVideoDataOutput()
             nextVideoOutput.alwaysDiscardsLateVideoFrames = true
+            // Keep the camera's native output. Vision receives a centered,
+            // aspect-correct image at the selected processing resolution below.
+            // This avoids unsupported output-size crashes on third-party cameras.
             nextVideoOutput.videoSettings = [:]
             nextVideoOutput.setSampleBufferDelegate(self, queue: inferenceQueue)
             videoOutput = nextVideoOutput
@@ -490,7 +541,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             status = TrackerStatus(
                 state: state,
                 camera: camera.localizedName,
-                handCount: 0,
+                detectionCount: 0,
                 trackingFPS: 0,
                 inferenceMilliseconds: 0,
                 droppedFrames: status.droppedFrames,
@@ -509,11 +560,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             status.state = "Recovering"
             status.camera = camera.localizedName
             status.isTracking = true
-            status.handCount = 0
+            status.detectionCount = 0
             status.trackingFPS = 0
             setTrackingError("Camera setup failed; retrying: \(error.localizedDescription)")
             clearPreviewOverlay()
-            sendActiveHands([0, 0])
+            sendInactiveTrackingSubjects()
             publishStatus()
             sendTrackingStatus(appRunning: true)
             return
@@ -543,14 +594,14 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         captureWatchdog.stop()
         status.state = "Idle"
         status.isTracking = false
-        status.handCount = 0
+        status.detectionCount = 0
         status.trackingFPS = 0
         status.inferenceMilliseconds = 0
         setTrackingError("")
         metaCalculator.reset()
         lossHysteresis.reset()
         clearPreviewOverlay()
-        sendActiveHands([0, 0])
+        sendInactiveTrackingSubjects()
         if sendStatus { sendTrackingStatus(appRunning: true) }
         publishStatus()
     }
@@ -580,10 +631,10 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
     private func rebuildCaptureSession(state: String, message: String) {
         guard !shuttingDown, trackingIntent.shouldRunCapture else { return }
-        status.handCount = 0
+        status.detectionCount = 0
         status.trackingFPS = 0
         clearPreviewOverlay()
-        sendActiveHands([0, 0])
+        sendInactiveTrackingSubjects()
         startCapture(state: state, message: message)
     }
 
@@ -598,11 +649,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         status.state = "Waiting for camera"
         status.camera = "None"
         status.isTracking = trackingIntent.isRequested
-        status.handCount = 0
+        status.detectionCount = 0
         status.trackingFPS = 0
         setTrackingError("The selected camera is unavailable. Tracking will resume when it reconnects.")
         clearPreviewOverlay()
-        sendActiveHands([0, 0])
+        sendInactiveTrackingSubjects()
         publishStatus()
         sendTrackingStatus(appRunning: true)
     }
@@ -634,59 +685,120 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
         let started = ProcessInfo.processInfo.systemUptime
         let roi = centeredRegionOfInterest(zoom: settings.zoom)
-        request.maximumHandCount = settings.maxHands
-        request.regionOfInterest = roi
-        let handler = makeImageRequestHandler(pixelBuffer: pixelBuffer, rotation: settings.rotation)
+        let visionInput = makeVisionInput(
+            pixelBuffer: pixelBuffer,
+            rotation: settings.rotation,
+            resolution: settings.resolution
+        )
+        let handler = visionInput.handler
         let detectionTimestamp = ProcessInfo.processInfo.systemUptime
+        let shouldPublishPreview = isPreviewPublishingEnabled()
+            && previewFrameCadence.shouldProcess(
+                timestamp: now,
+                targetHz: min(30, settings.cadenceHz)
+            )
 
         do {
-            try handler.perform([request])
-            let mapped = try (request.results ?? []).compactMap { observation -> ([NormalizedLandmark], Float)? in
-                try HandPoseMapper.landmarks(
-                    from: observation,
-                    minimumConfidence: settings.minimumConfidence
+            let previewDetections: [PreviewDetection]?
+            let detectionCount: Int
+            switch settings.trackingMode {
+            case .hands:
+                handRequest.maximumHandCount = settings.maximumHandRequestCount
+                handRequest.regionOfInterest = roi
+                try handler.perform([handRequest])
+                let mapped = try limited((handRequest.results ?? []).compactMap {
+                    try HandPoseMapper.landmarks(
+                        from: $0,
+                        minimumConfidence: settings.minimumConfidence
+                    )
+                }
+                .sorted { palmX($0.0) < palmX($1.0) }
                 )
-            }
-            .sorted { palmX($0.0) < palmX($1.0) }
-            .prefix(settings.maxHands)
-
-            let measuredDetections = mapped.enumerated().map { slot, item in
-                HandDetection(
-                    landmarks: item.0,
-                    meta: metaCalculator.compute(
+                let measured = mapped.enumerated().map { slot, item in
+                    HandDetection(
                         landmarks: item.0,
-                        score: item.1,
-                        slot: slot,
-                        timestamp: detectionTimestamp
+                        meta: metaCalculator.compute(
+                            landmarks: item.0,
+                            score: item.1,
+                            slot: slot,
+                            timestamp: detectionTimestamp
+                        )
+                    )
+                }
+                let detections = lossHysteresis.stabilize(
+                    detections: measured,
+                    timestamp: detectionTimestamp
+                )
+                if detections.isEmpty { metaCalculator.reset() }
+                sendHands(detections)
+                detectionCount = detections.count
+                previewDetections = shouldPublishPreview ? detections.map {
+                    PreviewDetection(landmarks: $0.landmarks, connections: HandSkeleton.connections)
+                } : nil
+
+            case .body:
+                bodyRequest.regionOfInterest = roi
+                try handler.perform([bodyRequest])
+                let detections = try limited((bodyRequest.results ?? [])
+                    .compactMap {
+                        try BodyPoseMapper.detection(
+                            from: $0,
+                            minimumConfidence: settings.minimumConfidence
+                        )
+                    }
+                    .sorted { detectionCenterX($0.landmarks) < detectionCenterX($1.landmarks) }
+                )
+                sendBodies(detections)
+                detectionCount = detections.count
+                previewDetections = shouldPublishPreview ? detections.map {
+                    PreviewDetection(landmarks: $0.landmarks, connections: BodySkeleton.connections)
+                } : nil
+
+            case .face:
+                faceRequest.regionOfInterest = roi
+                try handler.perform([faceRequest])
+                let detections = limited((faceRequest.results ?? [])
+                    .sorted { $0.boundingBox.midX < $1.boundingBox.midX }
+                    .map { FacePoseMapper.detection(from: $0) }
+                )
+                sendFaces(detections)
+                detectionCount = detections.count
+                previewDetections = shouldPublishPreview ? detections.map {
+                    PreviewDetection(landmarks: $0.landmarks, connections: $0.connections)
+                } : nil
+            }
+
+            let countChanged = status.detectionCount != detectionCount
+            status.detectionCount = detectionCount
+            if countChanged { sendTrackingStatus(appRunning: true) }
+            setTrackingError("")
+            if let previewDetections {
+                publishPreviewOverlay(
+                    detections: previewDetections,
+                    image: makePreviewImage(
+                        from: visionInput.image,
+                        regionOfInterest: roi,
+                        resolution: settings.resolution
                     )
                 )
             }
-            let detections = lossHysteresis.stabilize(
-                detections: measuredDetections,
-                timestamp: detectionTimestamp
-            )
-            let handCountChanged = status.handCount != detections.count
-            status.handCount = detections.count
-            if handCountChanged, detections.isEmpty { metaCalculator.reset() }
-            send(detections: detections)
-            if handCountChanged {
-                // /hands/active commits the complete frame for existing OSC
-                // receivers. Follow its edge with an immediate status packet
-                // so hand-present/absent UI remains correct even if one UDP
-                // callback is missed between the steady 1 Hz heartbeats.
-                sendTrackingStatus(appRunning: true)
-            }
-            setTrackingError("")
-            publishPreviewOverlay(detections: detections, pixelBuffer: pixelBuffer)
         } catch {
-            let detections = lossHysteresis.stabilize(detections: [], timestamp: detectionTimestamp)
-            let handCountChanged = status.handCount != detections.count
-            status.handCount = detections.count
-            if handCountChanged, detections.isEmpty { metaCalculator.reset() }
+            let previousCount = status.detectionCount
+            status.detectionCount = 0
+            metaCalculator.reset()
             setTrackingError("Vision: \(error.localizedDescription)")
-            send(detections: detections)
-            if handCountChanged { sendTrackingStatus(appRunning: true) }
-            publishPreviewOverlay(detections: detections, pixelBuffer: pixelBuffer)
+            sendEmptyFrame(for: settings.trackingMode)
+            if previousCount != 0 { sendTrackingStatus(appRunning: true) }
+            if shouldPublishPreview {
+                publishPreviewOverlay(
+                    detections: [],
+                    image: makePreviewImage(
+                        from: visionInput.image,
+                        regionOfInterest: roi,
+                        resolution: settings.resolution
+                    )
+                )
+            }
         }
 
         status.inferenceMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
@@ -708,10 +820,10 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         status.droppedFrames += 1
     }
 
-    private func send(detections: [HandDetection]) {
-        var active: [Int32] = [0, 0]
+    private func sendHands(_ detections: [HandDetection]) {
+        var active = activeSlots(count: detections.count)
         var messages: [(address: String, arguments: [OSCArgument])] = []
-        for (slot, detection) in detections.prefix(2).enumerated() {
+        for (slot, detection) in detections.enumerated() {
             guard detection.landmarks.count == 21 else { continue }
             active[slot] = 1
             messages.append((
@@ -727,26 +839,76 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             address: "/hands/active",
             arguments: active.map(OSCArgument.int32)
         ))
+        messages.append((address: "/bodies/active", arguments: [OSCArgument.int32(0), .int32(0)]))
+        messages.append((address: "/faces/active", arguments: [OSCArgument.int32(0), .int32(0)]))
         osc.sendBatch(messages, coalescingKey: "tracking-frame")
     }
 
+    private func sendBodies(_ detections: [NativePoseDetection]) {
+        var active = activeSlots(count: detections.count)
+        var messages: [(address: String, arguments: [OSCArgument])] = []
+        for (slot, detection) in detections.enumerated() {
+            guard detection.landmarks.count == BodyJointMap.visionOrder.count else { continue }
+            active[slot] = 1
+            messages.append((
+                address: "/body/\(slot)/landmarks",
+                arguments: OSCContract.landmarkArguments(detection.landmarks)
+            ))
+            messages.append((
+                address: "/body/\(slot)/meta",
+                arguments: [.float32(detection.confidence)]
+            ))
+        }
+        messages.append((address: "/bodies/active", arguments: active.map(OSCArgument.int32)))
+        messages.append((address: "/hands/active", arguments: [OSCArgument.int32(0), .int32(0)]))
+        messages.append((address: "/faces/active", arguments: [OSCArgument.int32(0), .int32(0)]))
+        osc.sendBatch(messages, coalescingKey: "tracking-frame")
+    }
+
+    private func sendFaces(_ detections: [NativeFaceDetection]) {
+        var active = activeSlots(count: detections.count)
+        var messages: [(address: String, arguments: [OSCArgument])] = []
+        for (slot, detection) in detections.enumerated() {
+            active[slot] = 1
+            messages.append((
+                address: "/face/\(slot)/landmarks",
+                arguments: OSCContract.landmarkArguments(detection.landmarks)
+            ))
+            messages.append((
+                address: "/face/\(slot)/bounds",
+                arguments: [
+                    .float32(Float(detection.bounds.minX)),
+                    .float32(Float(detection.bounds.minY)),
+                    .float32(Float(detection.bounds.width)),
+                    .float32(Float(detection.bounds.height)),
+                    .float32(detection.confidence)
+                ]
+            ))
+        }
+        messages.append((address: "/faces/active", arguments: active.map(OSCArgument.int32)))
+        messages.append((address: "/hands/active", arguments: [OSCArgument.int32(0), .int32(0)]))
+        messages.append((address: "/bodies/active", arguments: [OSCArgument.int32(0), .int32(0)]))
+        osc.sendBatch(messages, coalescingKey: "tracking-frame")
+    }
+
+    private func sendEmptyFrame(for _: TrackingMode) {
+        sendInactiveTrackingSubjects()
+    }
+
     private func publishPreviewOverlay(
-        detections: [HandDetection],
-        pixelBuffer: CVPixelBuffer
+        detections: [PreviewDetection],
+        image: CGImage?
     ) {
         previewPublishingLock.lock()
         guard previewPublishingEnabled, onPreviewOverlay != nil else {
             previewPublishingLock.unlock()
             return
         }
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        if width > 0, height > 0 {
-            lastPreviewAspectRatio = CGFloat(width) / CGFloat(height)
-        }
+        lastPreviewAspectRatio = settings.resolution.aspectRatio
         pendingPreviewFrame = PreviewOverlayFrame(
-            hands: detections.prefix(2).map(\.landmarks),
-            sourceAspectRatio: lastPreviewAspectRatio
+            detections: detections,
+            sourceAspectRatio: lastPreviewAspectRatio,
+            image: image
         )
         guard !previewDeliveryScheduled else {
             previewPublishingLock.unlock()
@@ -757,6 +919,13 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         DispatchQueue.main.async { [weak self] in self?.deliverLatestPreviewFrame() }
     }
 
+    private func isPreviewPublishingEnabled() -> Bool {
+        previewPublishingLock.lock()
+        let enabled = previewPublishingEnabled && onPreviewOverlay != nil
+        previewPublishingLock.unlock()
+        return enabled
+    }
+
     private func clearPreviewOverlay() {
         previewPublishingLock.lock()
         guard previewPublishingEnabled, onPreviewOverlay != nil else {
@@ -764,8 +933,9 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             return
         }
         pendingPreviewFrame = PreviewOverlayFrame(
-            hands: [],
-            sourceAspectRatio: lastPreviewAspectRatio
+            detections: [],
+            sourceAspectRatio: lastPreviewAspectRatio,
+            image: nil
         )
         guard !previewDeliveryScheduled else {
             previewPublishingLock.unlock()
@@ -786,9 +956,13 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         if let callback, let frame { callback(frame) }
     }
 
-    private func sendActiveHands(_ active: [Int32]) {
+    private func sendInactiveTrackingSubjects() {
         osc.sendBatch(
-            [(address: "/hands/active", arguments: active.map(OSCArgument.int32))],
+            [
+                (address: "/hands/active", arguments: [OSCArgument.int32(0), .int32(0)]),
+                (address: "/bodies/active", arguments: [OSCArgument.int32(0), .int32(0)]),
+                (address: "/faces/active", arguments: [OSCArgument.int32(0), .int32(0)])
+            ],
             coalescingKey: "tracking-frame"
         )
     }
@@ -804,7 +978,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             trackingActive: appRunning &&
                 trackingIntent.shouldRunCapture &&
                 captureWatchdog.hasReceivedSampleSinceStart,
-            handCount: appRunning ? status.handCount : 0,
+            detectionCount: appRunning ? status.detectionCount : 0,
             trackingFPS: appRunning ? status.trackingFPS : 0
         )
         heartbeatLock.lock()
@@ -821,7 +995,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             arguments: OSCContract.trackingStatusArguments(
                 appRunning: snapshot.appRunning,
                 trackingActive: snapshot.trackingActive,
-                handCount: snapshot.handCount,
+                handCount: snapshot.detectionCount,
                 trackingFPS: snapshot.trackingFPS
             )
         )
@@ -840,37 +1014,71 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         return CGRect(x: (1 - size) / 2, y: (1 - size) / 2, width: size, height: size)
     }
 
-    private func makeImageRequestHandler(
+    private func makeVisionInput(
         pixelBuffer: CVPixelBuffer,
-        rotation: Double
-    ) -> VNImageRequestHandler {
-        if let quarterTurns = ImageRotation.discreteQuarterTurns(rotation) {
-            let orientation: CGImagePropertyOrientation
-            switch quarterTurns {
-            case 1: orientation = .right
-            case 2: orientation = .down
-            case 3: orientation = .left
-            default: orientation = .up
-            }
-            return VNImageRequestHandler(
-                cvPixelBuffer: pixelBuffer,
-                orientation: orientation,
-                options: [:]
-            )
-        }
-
+        rotation: Double,
+        resolution: CaptureResolution
+    ) -> (handler: VNImageRequestHandler, image: CIImage) {
         let source = CIImage(cvPixelBuffer: pixelBuffer)
         let radians = CGFloat(-ImageRotation.normalizedDegrees(rotation) * .pi / 180)
-        let center = CGPoint(x: source.extent.midX, y: source.extent.midY)
-        let transform = CGAffineTransform(translationX: center.x, y: center.y)
+        let dimensions = resolution.pixelDimensions
+        let targetSize = CGSize(width: dimensions.width, height: dimensions.height)
+        // Bounding-box aspect fill leaves empty triangular corners after an
+        // arbitrary rotation. This cover scale keeps the exact Vision input
+        // filled at every angle, with the smallest unavoidable crop.
+        let coverScale = ImageRotation.minimumCoverScale(
+            source: source.extent.size,
+            target: targetSize,
+            rotationDegrees: rotation
+        ) * 1.001
+        let transform = CGAffineTransform(
+            translationX: targetSize.width / 2,
+            y: targetSize.height / 2
+        )
             .rotated(by: radians)
-            .translatedBy(x: -center.x, y: -center.y)
-        var rotated = source.transformed(by: transform)
-        rotated = rotated.transformed(by: CGAffineTransform(
-            translationX: -rotated.extent.minX,
-            y: -rotated.extent.minY
+            .scaledBy(x: coverScale, y: coverScale)
+            .translatedBy(x: -source.extent.midX, y: -source.extent.midY)
+        let processed = source.transformed(by: transform).cropped(
+            to: CGRect(origin: .zero, size: targetSize)
+        )
+        return (
+            VNImageRequestHandler(ciImage: processed, orientation: .up, options: [:]),
+            processed
+        )
+    }
+
+    private func makePreviewImage(
+        from processed: CIImage,
+        regionOfInterest: CGRect,
+        resolution: CaptureResolution
+    ) -> CGImage? {
+        let extent = processed.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+        let roi = regionOfInterest.standardized.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !roi.isEmpty else { return nil }
+        let crop = CGRect(
+            x: extent.minX + roi.minX * extent.width,
+            y: extent.minY + roi.minY * extent.height,
+            width: roi.width * extent.width,
+            height: roi.height * extent.height
+        )
+        var visible = processed.cropped(to: crop)
+        visible = visible.transformed(by: CGAffineTransform(
+            translationX: -crop.minX,
+            y: -crop.minY
         ))
-        return VNImageRequestHandler(ciImage: rotated, orientation: .up, options: [:])
+        let dimensions = resolution.pixelDimensions
+        visible = visible.transformed(by: CGAffineTransform(
+            scaleX: CGFloat(dimensions.width) / crop.width,
+            y: CGFloat(dimensions.height) / crop.height
+        ))
+        let outputRect = CGRect(
+            x: 0,
+            y: 0,
+            width: dimensions.width,
+            height: dimensions.height
+        )
+        return previewContext.createCGImage(visible, from: outputRect)
     }
 
     private func checkCaptureHealth() {
@@ -907,12 +1115,28 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         return [0, 5, 9, 13, 17].map { landmarks[$0].x }.reduce(0, +) / 5
     }
 
+    private func detectionCenterX(_ landmarks: [NormalizedLandmark]) -> Float {
+        let visible = landmarks.filter(HandOverlayGeometry.isDrawable)
+        guard !visible.isEmpty else { return 0 }
+        return visible.map(\.x).reduce(0, +) / Float(visible.count)
+    }
+
+    private func limited<T>(_ values: [T]) -> [T] {
+        guard let maximum = settings.maximumDetectionCount else { return values }
+        return Array(values.prefix(maximum))
+    }
+
+    private func activeSlots(count: Int) -> [Int32] {
+        let activeCount = max(0, count)
+        return (0..<max(2, activeCount)).map { $0 < activeCount ? 1 : 0 }
+    }
+
     private func fail(_ message: String) {
         status.state = "Error"
         setTrackingError(message)
         status.isTracking = false
-        status.handCount = 0
-        sendActiveHands([0, 0])
+        status.detectionCount = 0
+        sendInactiveTrackingSubjects()
         clearPreviewOverlay()
         publishStatus()
         sendTrackingStatus(appRunning: true)
@@ -967,11 +1191,16 @@ private enum TrackerError: LocalizedError {
 }
 
 private extension CaptureResolution {
-    var sessionPreset: AVCaptureSession.Preset {
+    var sessionPresetsInPriorityOrder: [AVCaptureSession.Preset] {
         switch self {
-        case .low: return .low
-        case .vga: return .vga640x480
-        case .hd: return .hd1280x720
+        case .ultraLow: return [.vga640x480, .medium, .low]
+        case .low: return [.vga640x480, .medium, .low]
+        case .vga: return [.vga640x480, .medium]
+        case .highFourThree: return [.high, .hd1280x720, .vga640x480]
+        case .ultraLowWidescreen: return [.hd1280x720, .iFrame960x540, .medium]
+        case .lowWidescreen: return [.hd1280x720, .iFrame960x540, .medium]
+        case .widescreen: return [.iFrame960x540, .hd1280x720, .medium]
+        case .hd: return [.hd1280x720, .iFrame960x540, .medium]
         }
     }
 }
