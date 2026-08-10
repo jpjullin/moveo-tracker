@@ -1,5 +1,19 @@
 import Foundation
 
+public enum TrackingMode: String, Codable, CaseIterable, Sendable {
+    case hands = "Hands"
+    case body = "Body"
+    case face = "Face"
+
+    public var subjectLabel: String {
+        switch self {
+        case .hands: return "hands"
+        case .body: return "bodies"
+        case .face: return "faces"
+        }
+    }
+}
+
 public enum TrackingPreset: String, Codable, CaseIterable, Sendable {
     case saver = "Saver"
     case eco = "Eco"
@@ -24,12 +38,54 @@ public enum TrackingPreset: String, Codable, CaseIterable, Sendable {
 }
 
 public enum CaptureResolution: String, Codable, CaseIterable, Sendable {
+    case ultraLow = "160 x 120"
     case low = "Low"
     case vga = "640 x 480"
+    case highFourThree = "960 x 720"
+    case ultraLowWidescreen = "320 x 180"
+    case lowWidescreen = "640 x 360"
+    case widescreen = "960 x 540"
     case hd = "1280 x 720"
+
+    public var displayName: String {
+        switch self {
+        case .ultraLow: return "160 × 120 (4:3)"
+        case .low: return "320 × 240 (4:3)"
+        case .vga: return "640 × 480 (4:3)"
+        case .highFourThree: return "960 × 720 (4:3)"
+        case .ultraLowWidescreen: return "320 × 180 (16:9)"
+        case .lowWidescreen: return "640 × 360 (16:9)"
+        case .widescreen: return "960 × 540 (16:9)"
+        case .hd: return "1280 × 720 (16:9)"
+        }
+    }
+
+    public var aspectRatio: CGFloat {
+        switch self {
+        case .ultraLow, .low, .vga, .highFourThree: return 4 / 3
+        case .ultraLowWidescreen, .lowWidescreen, .widescreen, .hd: return 16 / 9
+        }
+    }
+
+    public var pixelDimensions: (width: Int, height: Int) {
+        switch self {
+        case .ultraLow: return (160, 120)
+        case .low: return (320, 240)
+        case .vga: return (640, 480)
+        case .highFourThree: return (960, 720)
+        case .ultraLowWidescreen: return (320, 180)
+        case .lowWidescreen: return (640, 360)
+        case .widescreen: return (960, 540)
+        case .hd: return (1280, 720)
+        }
+    }
 }
 
 public struct AppSettings: Codable, Equatable, Sendable {
+    public static let unlimited = 0
+    public static let unlimitedHandRequestLimit = 64
+
+    public var trackingMode: TrackingMode
     public var cameraID: String
     public var preset: TrackingPreset
     public var maxHands: Int
@@ -42,6 +98,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var minimumConfidence: Float
 
     public init(
+        trackingMode: TrackingMode = .hands,
         cameraID: String = "",
         preset: TrackingPreset = .balanced,
         maxHands: Int = 2,
@@ -53,6 +110,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         oscPort: Int = 9000,
         minimumConfidence: Float = 0.15
     ) {
+        self.trackingMode = trackingMode
         self.cameraID = cameraID
         self.preset = preset
         self.maxHands = maxHands
@@ -63,6 +121,27 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.oscHost = oscHost
         self.oscPort = oscPort
         self.minimumConfidence = minimumConfidence
+        sanitize()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case trackingMode, cameraID, preset, maxHands, cadenceHz, resolution
+        case zoom, rotation, oscHost, oscPort, minimumConfidence
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        trackingMode = try values.decodeIfPresent(TrackingMode.self, forKey: .trackingMode) ?? .hands
+        cameraID = try values.decode(String.self, forKey: .cameraID)
+        preset = try values.decode(TrackingPreset.self, forKey: .preset)
+        maxHands = try values.decode(Int.self, forKey: .maxHands)
+        cadenceHz = try values.decode(Double.self, forKey: .cadenceHz)
+        resolution = try values.decode(CaptureResolution.self, forKey: .resolution)
+        zoom = try values.decode(Double.self, forKey: .zoom)
+        rotation = try values.decode(Double.self, forKey: .rotation)
+        oscHost = try values.decode(String.self, forKey: .oscHost)
+        oscPort = try values.decode(Int.self, forKey: .oscPort)
+        minimumConfidence = try values.decode(Float.self, forKey: .minimumConfidence)
         sanitize()
     }
 
@@ -89,7 +168,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     public mutating func sanitize() {
-        maxHands = min(2, max(1, maxHands))
+        if maxHands != Self.unlimited {
+            maxHands = min(2, max(1, maxHands))
+        }
         cadenceHz = min(60, max(1, cadenceHz))
         zoom = min(10, max(1, zoom))
         rotation = ImageRotation.normalizedDegrees(rotation)
@@ -97,6 +178,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
         if oscHost.isEmpty { oscHost = "127.0.0.1" }
         oscPort = min(65_535, max(1, oscPort))
         minimumConfidence = min(1, max(0, minimumConfidence))
+    }
+
+    public var isUnlimited: Bool {
+        maxHands == Self.unlimited
+    }
+
+    public var maximumDetectionCount: Int? {
+        isUnlimited ? nil : maxHands
+    }
+
+    public var maximumHandRequestCount: Int {
+        isUnlimited ? Self.unlimitedHandRequestLimit : maxHands
     }
 }
 
@@ -114,6 +207,21 @@ public enum ImageRotation {
             if abs(normalized - value) < 0.000_001 { return turns }
         }
         return nil
+    }
+
+    public static func minimumCoverScale(
+        source: CGSize,
+        target: CGSize,
+        rotationDegrees: Double
+    ) -> CGFloat {
+        guard source.width > 0, source.height > 0,
+              target.width > 0, target.height > 0 else { return 1 }
+        let radians = CGFloat(normalizedDegrees(rotationDegrees) * .pi / 180)
+        let cosine = abs(cos(radians))
+        let sine = abs(sin(radians))
+        let horizontal = (target.width * cosine + target.height * sine) / source.width
+        let vertical = (target.width * sine + target.height * cosine) / source.height
+        return max(horizontal, vertical)
     }
 }
 

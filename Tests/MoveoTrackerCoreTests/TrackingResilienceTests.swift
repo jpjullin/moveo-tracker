@@ -1,5 +1,5 @@
 import XCTest
-@testable import HandVisionCore
+@testable import MoveoTrackerCore
 
 final class TrackingResilienceTests: XCTestCase {
     func testSleepPreservesUserIntentWithoutRunningCapture() {

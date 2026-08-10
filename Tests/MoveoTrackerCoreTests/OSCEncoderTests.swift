@@ -1,8 +1,15 @@
 import XCTest
 import Darwin
-@testable import HandVisionCore
+@testable import MoveoTrackerCore
 
 final class OSCEncoderTests: XCTestCase {
+    func testOSCContractListsEveryNativeModelAddress() {
+        XCTAssertTrue(OSCContract.addresses.contains("/hands/active"))
+        XCTAssertTrue(OSCContract.addresses.contains("/bodies/active"))
+        XCTAssertTrue(OSCContract.addresses.contains("/faces/active"))
+        XCTAssertTrue(OSCContract.addresses.contains("/tracking/status"))
+    }
+
     func testHandsActivePacketUsesPaddedStringsAndBigEndianInts() throws {
         let packet = try OSCEncoder.encodeMessage(
             address: "/hands/active",

@@ -60,6 +60,16 @@ public enum OSCContract {
         "/hand/1/landmarks",
         "/hand/1/meta",
         "/hands/active",
+        "/body/0/landmarks",
+        "/body/0/meta",
+        "/body/1/landmarks",
+        "/body/1/meta",
+        "/bodies/active",
+        "/face/0/landmarks",
+        "/face/0/bounds",
+        "/face/1/landmarks",
+        "/face/1/bounds",
+        "/faces/active",
         "/tracking/status"
     ]
 

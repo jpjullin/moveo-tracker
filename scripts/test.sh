@@ -14,15 +14,15 @@ if [[ -z "$(/usr/bin/plutil -extract CFBundleShortVersionString raw Info.plist)"
     echo "Info.plist: missing release version" >&2
     exit 1
 fi
-if [[ -z "$(/usr/bin/plutil -extract PoseDtxReleaseDate raw Info.plist)" ]]; then
+if [[ -z "$(/usr/bin/plutil -extract MoveoTrackerReleaseDate raw Info.plist)" ]]; then
     echo "Info.plist: missing release date" >&2
     exit 1
 fi
 if /usr/bin/grep -ERq \
     'activeVideo(Min|Max)FrameDuration|isVideoMirroringSupported|automaticallyAdjustsVideoMirroring|isVideoMirrored' \
-    Sources/HandVisionNative; then
+    Sources/MoveoTracker; then
     echo "Unsafe AVFoundation camera-connection selector found" >&2
     exit 1
 fi
 swift test
-swift run HandVisionNative --self-test
+swift run MoveoTracker --self-test

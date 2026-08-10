@@ -61,7 +61,7 @@ func renderIcon(pixels: Int) throws -> Data {
     let configuration = baseConfiguration.applying(whiteConfiguration)
     guard let hand = NSImage(
         systemSymbolName: "hand.raised.fill",
-        accessibilityDescription: "Hand Vision Native"
+        accessibilityDescription: "Moveo Tracker"
     )?.withSymbolConfiguration(configuration) else {
         throw CocoaError(.featureUnsupported)
     }

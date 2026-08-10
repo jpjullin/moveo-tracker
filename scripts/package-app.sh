@@ -3,11 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-APP_DIR="$PROJECT_DIR/dist/Hand Vision Native.app"
+APP_DIR="$PROJECT_DIR/dist/Moveo Tracker.app"
 CONTENTS_DIR="$APP_DIR/Contents"
-ICON_WORK_DIR="$PROJECT_DIR/.build/hand-vision-app-icon"
+ICON_WORK_DIR="$PROJECT_DIR/.build/moveo-tracker-app-icon"
 ICONSET_DIR="$ICON_WORK_DIR/AppIcon.iconset"
-BUNDLE_IDENTIFIER="site.posedtx.hand-vision-native"
+BUNDLE_IDENTIFIER="site.posedtx.moveo-tracker"
 
 case "$APP_DIR" in
     "$PROJECT_DIR"/dist/*) ;;
@@ -21,7 +21,7 @@ BIN_DIR="$(swift build -c release --show-bin-path)"
 
 rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
-cp "$BIN_DIR/HandVisionNative" "$CONTENTS_DIR/MacOS/HandVisionNative"
+cp "$BIN_DIR/MoveoTracker" "$CONTENTS_DIR/MacOS/MoveoTracker"
 cp "$PROJECT_DIR/Info.plist" "$CONTENTS_DIR/Info.plist"
 
 rm -rf "$ICON_WORK_DIR"
