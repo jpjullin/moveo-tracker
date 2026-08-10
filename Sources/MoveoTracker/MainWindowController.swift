@@ -322,7 +322,11 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
 
         unlimitedHintLabel.font = .systemFont(ofSize: 10, weight: .medium)
         unlimitedHintLabel.textColor = .systemOrange
-        unlimitedHintLabel.isHidden = true
+        // Keep this arranged subview in the stack at all times. Toggling
+        // isHidden would add/remove its intrinsic height and make the sidebar
+        // jump when "Up to 8" is selected.
+        unlimitedHintLabel.alphaValue = 0
+        unlimitedHintLabel.setAccessibilityHidden(true)
 
         let presetColumn = controlColumn("Performance", presetPopup)
         let maximumColumn = controlColumn("Maximum", subjectsControl)
@@ -561,7 +565,8 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         modeControl.selectedSegment = TrackingMode.allCases.firstIndex(of: settings.trackingMode) ?? 0
         presetPopup.selectItem(withTitle: settings.preset.rawValue)
         subjectsControl.selectedSegment = settings.isUnlimited ? 2 : max(0, settings.maxHands - 1)
-        unlimitedHintLabel.isHidden = !settings.isUnlimited
+        unlimitedHintLabel.alphaValue = settings.isUnlimited ? 1 : 0
+        unlimitedHintLabel.setAccessibilityHidden(!settings.isUnlimited)
         cadencePopup.selectItem(withTitle: String(format: "%.0f", settings.cadenceHz))
         resolutionPopup.selectItem(withTitle: settings.resolution.displayName)
         zoomSlider.doubleValue = settings.zoom
