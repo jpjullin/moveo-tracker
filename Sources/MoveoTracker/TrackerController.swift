@@ -31,7 +31,6 @@ struct PreviewDetection: Sendable {
 struct PreviewOverlayFrame: Sendable {
     var detections: [PreviewDetection]
     var sourceAspectRatio: CGFloat
-    var image: CGImage?
 }
 
 private struct TrackingHeartbeatSnapshot: Sendable {
@@ -39,6 +38,24 @@ private struct TrackingHeartbeatSnapshot: Sendable {
     var trackingActive = false
     var detectionCount = 0
     var trackingFPS = 0.0
+}
+
+private struct CaptureFormatCandidate {
+    var format: AVCaptureDevice.Format
+    var width: Int32
+    var height: Int32
+    var aspectError: Double
+    var canReachTargetRate: Bool
+    var effectiveFrameRate: Double
+
+    var pixelsPerSecond: Double {
+        Double(width) * Double(height) * effectiveFrameRate
+    }
+}
+
+private struct VisionInput {
+    var handler: VNImageRequestHandler
+    var regionOfInterest: CGRect
 }
 
 final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -75,6 +92,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var previewFrameCadence = FrameCadence()
     private var lastStatusPublish = -Double.infinity
     private var currentInput: AVCaptureDeviceInput?
+    private var lockedCaptureDevice: AVCaptureDevice?
     private var captureObservers: [NSObjectProtocol] = []
     private var resumeWhenCameraReturns = false
     private var waitingCameraID: String?
@@ -83,11 +101,10 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var trackingError = ""
     private var oscError = ""
     private let previewPublishingLock = NSLock()
-    private let previewContext = CIContext(options: [.cacheIntermediates: false])
-    private let previewColorSpace = CGColorSpaceCreateDeviceRGB()
     private var previewPublishingEnabled = false
     private var pendingPreviewFrame: PreviewOverlayFrame?
     private var previewDeliveryScheduled = false
+    private let previewCadenceHz = 15.0
     private let statusPublishingLock = NSLock()
     private var pendingPublishedStatus: TrackerStatus?
     private var statusDeliveryScheduled = false
@@ -109,6 +126,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         super.init()
 
         handRequest.maximumHandCount = clean.maximumHandRequestCount
+        configureVisionRequests(for: clean)
         osc.configure(host: clean.oscHost, port: clean.oscPort)
         osc.onError = { [weak self] message in
             self?.inferenceQueue.async { [weak self] in
@@ -154,14 +172,21 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         if let clean, !shuttingDown {
             let cadenceChanged = settings.cadenceHz != clean.cadenceHz
             let modeChanged = settings.trackingMode != clean.trackingMode
+            let activityPolicyChanged = settings.preset != clean.preset
             let needsRestart = trackingIntent.shouldRunCapture && (
                 settings.cameraID != clean.cameraID ||
                 settings.resolution != clean.resolution
             )
             settings = clean
             handRequest.maximumHandCount = clean.maximumHandRequestCount
+            configureVisionRequests(for: clean)
             status.oscDestination = "\(clean.oscHost):\(clean.oscPort)"
             osc.configure(host: clean.oscHost, port: clean.oscPort)
+
+            if activityPolicyChanged, trackingIntent.shouldRunCapture {
+                endTrackingActivity()
+                beginTrackingActivity()
+            }
 
             if modeChanged {
                 lossHysteresis.reset()
@@ -177,6 +202,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             } else {
                 if cadenceChanged, trackingIntent.shouldRunCapture {
                     frameCadence.reset()
+                    previewFrameCadence.reset()
+                    configureCaptureFrameRate(
+                        for: currentInput?.device,
+                        targetHz: clean.cadenceHz
+                    )
                 }
                 publishStatus()
             }
@@ -507,34 +537,46 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         tearDownCapturePipeline()
 
         do {
-            session.beginConfiguration()
-            defer { session.commitConfiguration() }
+            do {
+                session.beginConfiguration()
+                defer { session.commitConfiguration() }
 
-            let desiredPreset = settings.resolution.sessionPresetsInPriorityOrder
-                .first(where: { session.canSetSessionPreset($0) })
-            session.sessionPreset = desiredPreset ?? .medium
+                let input = try AVCaptureDeviceInput(device: camera)
+                guard session.canAddInput(input) else {
+                    throw TrackerError.configuration("The selected camera cannot be added to the capture session.")
+                }
+                session.addInput(input)
+                currentInput = input
 
-            let input = try AVCaptureDeviceInput(device: camera)
-            guard session.canAddInput(input) else {
-                throw TrackerError.configuration("The selected camera cannot be added to the capture session.")
+                if !configurePreferredCaptureFormat(
+                    for: camera,
+                    resolution: settings.resolution,
+                    targetHz: settings.cadenceHz
+                ) {
+                    let desiredPreset = settings.resolution.sessionPresetsInPriorityOrder
+                        .first(where: { session.canSetSessionPreset($0) })
+                    session.sessionPreset = desiredPreset ?? .medium
+                }
+
+                let nextVideoOutput = AVCaptureVideoDataOutput()
+                nextVideoOutput.alwaysDiscardsLateVideoFrames = true
+                // Keep the camera's native pixel format so Vision can consume
+                // matching buffers directly without an avoidable color conversion.
+                nextVideoOutput.videoSettings = [:]
+                nextVideoOutput.setSampleBufferDelegate(self, queue: inferenceQueue)
+                videoOutput = nextVideoOutput
+                guard session.canAddOutput(nextVideoOutput) else {
+                    throw TrackerError.configuration("The video output cannot be added to the capture session.")
+                }
+                session.addOutput(nextVideoOutput)
             }
-            session.addInput(input)
-            currentInput = input
 
-            let nextVideoOutput = AVCaptureVideoDataOutput()
-            nextVideoOutput.alwaysDiscardsLateVideoFrames = true
-            // Keep the camera's native output. Vision receives a centered,
-            // aspect-correct image at the selected processing resolution below.
-            // This avoids unsupported output-size crashes on third-party cameras.
-            nextVideoOutput.videoSettings = [:]
-            nextVideoOutput.setSampleBufferDelegate(self, queue: inferenceQueue)
-            videoOutput = nextVideoOutput
-            guard session.canAddOutput(nextVideoOutput) else {
-                throw TrackerError.configuration("The video output cannot be added to the capture session.")
-            }
-            session.addOutput(nextVideoOutput)
+            // Preset commits may replace the device's active format, so apply
+            // the rate limit once more to the format the session actually chose.
+            configureCaptureFrameRate(for: camera, targetHz: settings.cadenceHz)
 
             frameCadence.reset()
+            previewFrameCadence.reset()
             fpsWindowStarted = ProcessInfo.processInfo.systemUptime
             fpsWindowFrames = 0
             metaCalculator.reset()
@@ -572,6 +614,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
 
         session.startRunning()
+        releaseCaptureDeviceLock()
         captureWatchdog.captureStarted(at: ProcessInfo.processInfo.systemUptime)
         if !session.isRunning {
             status.state = "Recovering"
@@ -579,6 +622,128 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
         publishStatus()
         sendTrackingStatus(appRunning: true)
+    }
+
+    private func configurePreferredCaptureFormat(
+        for camera: AVCaptureDevice,
+        resolution: CaptureResolution,
+        targetHz: Double
+    ) -> Bool {
+        guard let format = preferredCaptureFormat(
+            for: camera,
+            resolution: resolution,
+            targetHz: targetHz
+        ) else { return false }
+
+        do {
+            try camera.lockForConfiguration()
+            camera.activeFormat = format
+            // On macOS, the session may otherwise replace an explicitly chosen
+            // activeFormat at commit/start. Retain the configuration lock until
+            // startRunning completes, then release it for other camera clients.
+            lockedCaptureDevice = camera
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func preferredCaptureFormat(
+        for camera: AVCaptureDevice,
+        resolution: CaptureResolution,
+        targetHz: Double
+    ) -> AVCaptureDevice.Format? {
+        let target = resolution.pixelDimensions
+        let targetAspect = Double(target.width) / Double(target.height)
+        var candidates = camera.formats.compactMap { format -> CaptureFormatCandidate? in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard dimensions.width > 0, dimensions.height > 0 else { return nil }
+            let aspect = Double(dimensions.width) / Double(dimensions.height)
+            let ranges = format.videoSupportedFrameRateRanges
+            guard !ranges.isEmpty else { return nil }
+            let effectiveRate = ranges.map { range in
+                min(range.maxFrameRate, max(range.minFrameRate, targetHz))
+            }.min(by: { abs($0 - targetHz) < abs($1 - targetHz) }) ?? targetHz
+            return CaptureFormatCandidate(
+                format: format,
+                width: dimensions.width,
+                height: dimensions.height,
+                aspectError: abs(aspect - targetAspect) / targetAspect,
+                canReachTargetRate: ranges.contains { $0.maxFrameRate + 0.001 >= targetHz },
+                effectiveFrameRate: effectiveRate
+            )
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        let covering = candidates.filter {
+            Int($0.width) >= target.width && Int($0.height) >= target.height
+        }
+        if !covering.isEmpty { candidates = covering }
+
+        let aspectMatched = candidates.filter { $0.aspectError <= 0.02 }
+        if !aspectMatched.isEmpty { candidates = aspectMatched }
+
+        let rateMatched = candidates.filter(\.canReachTargetRate)
+        if !rateMatched.isEmpty { candidates = rateMatched }
+
+        return candidates.min { lhs, rhs in
+            if abs(lhs.pixelsPerSecond - rhs.pixelsPerSecond) > 0.5 {
+                return lhs.pixelsPerSecond < rhs.pixelsPerSecond
+            }
+            if lhs.width != rhs.width || lhs.height != rhs.height {
+                return Int64(lhs.width) * Int64(lhs.height) < Int64(rhs.width) * Int64(rhs.height)
+            }
+            return lhs.aspectError < rhs.aspectError
+        }?.format
+    }
+
+    private func configureCaptureFrameRate(
+        for camera: AVCaptureDevice?,
+        targetHz: Double
+    ) {
+        guard let camera,
+              let duration = preferredFrameDuration(
+                  for: camera.activeFormat,
+                  targetHz: targetHz
+              ),
+              duration.isValid,
+              duration.seconds > 0 else { return }
+        if lockedCaptureDevice === camera {
+            camera.activeVideoMinFrameDuration = duration
+            camera.activeVideoMaxFrameDuration = duration
+            return
+        }
+        do {
+            try camera.lockForConfiguration()
+            defer { camera.unlockForConfiguration() }
+            camera.activeVideoMinFrameDuration = duration
+            camera.activeVideoMaxFrameDuration = duration
+        } catch {
+            // Frame-rate limiting is an optimization. Keep capture alive if a
+            // third-party camera refuses configuration and let cadence discard.
+        }
+    }
+
+    private func preferredFrameDuration(
+        for format: AVCaptureDevice.Format,
+        targetHz: Double
+    ) -> CMTime? {
+        let safeTarget = max(1, targetHz)
+        let choices = format.videoSupportedFrameRateRanges.map { range -> (Double, CMTime) in
+            if safeTarget <= range.minFrameRate {
+                return (range.minFrameRate, range.maxFrameDuration)
+            }
+            if safeTarget >= range.maxFrameRate {
+                return (range.maxFrameRate, range.minFrameDuration)
+            }
+            return (
+                safeTarget,
+                CMTime(seconds: 1 / safeTarget, preferredTimescale: 600_000)
+            )
+        }
+        return choices.min { lhs, rhs in
+            abs(lhs.0 - safeTarget) < abs(rhs.0 - safeTarget)
+        }?.1
     }
 
     private func stopCapture(sendStatus: Bool) {
@@ -608,6 +773,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 
     private func tearDownCapturePipeline() {
+        defer { releaseCaptureDeviceLock() }
         let previousVideoOutput = videoOutput
         previousVideoOutput?.setSampleBufferDelegate(nil, queue: nil)
         if session.isRunning { session.stopRunning() }
@@ -628,6 +794,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
         session.commitConfiguration()
         videoOutput = nil
+    }
+
+    private func releaseCaptureDeviceLock() {
+        lockedCaptureDevice?.unlockForConfiguration()
+        lockedCaptureDevice = nil
     }
 
     private func rebuildCaptureSession(state: String, message: String) {
@@ -685,18 +856,19 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         guard frameCadence.shouldProcess(timestamp: now, targetHz: settings.cadenceHz) else { return }
 
         let started = ProcessInfo.processInfo.systemUptime
-        let roi = centeredRegionOfInterest(zoom: settings.zoom)
         let visionInput = makeVisionInput(
             pixelBuffer: pixelBuffer,
             rotation: settings.rotation,
-            resolution: settings.resolution
+            resolution: settings.resolution,
+            zoom: settings.zoom
         )
         let handler = visionInput.handler
+        let roi = visionInput.regionOfInterest
         let detectionTimestamp = ProcessInfo.processInfo.systemUptime
         let shouldPublishPreview = isPreviewPublishingEnabled()
             && previewFrameCadence.shouldProcess(
                 timestamp: now,
-                targetHz: settings.cadenceHz
+                targetHz: previewCadenceHz
             )
 
         do {
@@ -776,36 +948,46 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 } : nil
             }
 
-            let countChanged = status.detectionCount != detectionCount
+            let exportedHandCountBefore = exportedHandCount(status.detectionCount)
             status.detectionCount = detectionCount
-            if countChanged { sendTrackingStatus(appRunning: true) }
+            if exportedHandCountBefore != exportedHandCount(detectionCount) {
+                sendTrackingStatus(appRunning: true)
+            }
             setTrackingError("")
             if let previewDetections {
                 publishPreviewOverlay(
-                    detections: previewDetections,
-                    image: makePreviewImage(
-                        from: visionInput.image,
-                        regionOfInterest: roi,
-                        resolution: settings.resolution
-                    )
+                    detections: previewDetections
                 )
             }
         } catch {
-            let previousCount = status.detectionCount
-            status.detectionCount = 0
-            metaCalculator.reset()
             setTrackingError("Vision: \(error.localizedDescription)")
-            sendEmptyFrame(for: settings.trackingMode)
-            if previousCount != 0 { sendTrackingStatus(appRunning: true) }
-            if shouldPublishPreview {
-                publishPreviewOverlay(
+            let exportedHandCountBefore = exportedHandCount(status.detectionCount)
+            if settings.trackingMode == .hands {
+                let detections = lossHysteresis.stabilize(
                     detections: [],
-                    image: makePreviewImage(
-                        from: visionInput.image,
-                        regionOfInterest: roi,
-                        resolution: settings.resolution
-                    )
+                    timestamp: detectionTimestamp
                 )
+                status.detectionCount = detections.count
+                if detections.isEmpty { metaCalculator.reset() }
+                sendHands(detections)
+                if exportedHandCountBefore != exportedHandCount(detections.count) {
+                    sendTrackingStatus(appRunning: true)
+                }
+                if shouldPublishPreview {
+                    publishPreviewOverlay(detections: detections.map {
+                        PreviewDetection(
+                            landmarks: $0.landmarks,
+                            connections: HandSkeleton.connections
+                        )
+                    })
+                }
+            } else {
+                status.detectionCount = 0
+                metaCalculator.reset()
+                sendEmptyFrame(for: settings.trackingMode)
+                if shouldPublishPreview {
+                    publishPreviewOverlay(detections: [])
+                }
             }
         }
 
@@ -829,11 +1011,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 
     private func sendHands(_ detections: [HandDetection]) {
-        var active = activeSlots(count: detections.count)
+        let exported = detections.prefix(OSCContract.handSlotCount)
         var messages: [(address: String, arguments: [OSCArgument])] = []
-        for (slot, detection) in detections.enumerated() {
+        messages.reserveCapacity(exported.count * 2 + 1)
+        for (slot, detection) in exported.enumerated() {
             guard detection.landmarks.count == 21 else { continue }
-            active[slot] = 1
             messages.append((
                 address: "/hand/\(slot)/landmarks",
                 arguments: OSCContract.landmarkArguments(detection.landmarks)
@@ -845,10 +1027,8 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
         messages.append((
             address: "/hands/active",
-            arguments: active.map(OSCArgument.int32)
+            arguments: OSCContract.handActiveArguments(handCount: exported.count)
         ))
-        messages.append((address: "/bodies/active", arguments: [OSCArgument.int32(0), .int32(0)]))
-        messages.append((address: "/faces/active", arguments: [OSCArgument.int32(0), .int32(0)]))
         osc.sendBatch(messages, coalescingKey: "tracking-frame")
     }
 
@@ -899,14 +1079,23 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         osc.sendBatch(messages, coalescingKey: "tracking-frame")
     }
 
-    private func sendEmptyFrame(for _: TrackingMode) {
-        sendInactiveTrackingSubjects()
+    private func sendEmptyFrame(for mode: TrackingMode) {
+        if mode == .hands {
+            osc.sendBatch(
+                [
+                    (
+                        address: "/hands/active",
+                        arguments: OSCContract.handActiveArguments(handCount: 0)
+                    )
+                ],
+                coalescingKey: "tracking-frame"
+            )
+        } else {
+            sendInactiveTrackingSubjects()
+        }
     }
 
-    private func publishPreviewOverlay(
-        detections: [PreviewDetection],
-        image: CGImage?
-    ) {
+    private func publishPreviewOverlay(detections: [PreviewDetection]) {
         previewPublishingLock.lock()
         guard previewPublishingEnabled, onPreviewOverlay != nil else {
             previewPublishingLock.unlock()
@@ -915,8 +1104,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         lastPreviewAspectRatio = settings.resolution.aspectRatio
         pendingPreviewFrame = PreviewOverlayFrame(
             detections: detections,
-            sourceAspectRatio: lastPreviewAspectRatio,
-            image: image
+            sourceAspectRatio: lastPreviewAspectRatio
         )
         guard !previewDeliveryScheduled else {
             previewPublishingLock.unlock()
@@ -942,8 +1130,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
         pendingPreviewFrame = PreviewOverlayFrame(
             detections: [],
-            sourceAspectRatio: lastPreviewAspectRatio,
-            image: nil
+            sourceAspectRatio: lastPreviewAspectRatio
         )
         guard !previewDeliveryScheduled else {
             previewPublishingLock.unlock()
@@ -986,7 +1173,7 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             trackingActive: appRunning &&
                 trackingIntent.shouldRunCapture &&
                 captureWatchdog.hasReceivedSampleSinceStart,
-            detectionCount: appRunning ? status.detectionCount : 0,
+            detectionCount: appRunning ? exportedHandCount(status.detectionCount) : 0,
             trackingFPS: appRunning ? status.trackingFPS : 0
         )
         heartbeatLock.lock()
@@ -1025,72 +1212,77 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private func makeVisionInput(
         pixelBuffer: CVPixelBuffer,
         rotation: Double,
-        resolution: CaptureResolution
-    ) -> (handler: VNImageRequestHandler, image: CIImage) {
+        resolution: CaptureResolution,
+        zoom: Double
+    ) -> VisionInput {
+        if let orientation = directVisionOrientation(
+            pixelBuffer: pixelBuffer,
+            rotation: rotation,
+            resolution: resolution
+        ) {
+            return VisionInput(
+                handler: VNImageRequestHandler(
+                    cvPixelBuffer: pixelBuffer,
+                    orientation: orientation,
+                    options: [:]
+                ),
+                regionOfInterest: centeredRegionOfInterest(zoom: zoom)
+            )
+        }
+
         let source = CIImage(cvPixelBuffer: pixelBuffer)
         let radians = CGFloat(-ImageRotation.normalizedDegrees(rotation) * .pi / 180)
         let dimensions = resolution.pixelDimensions
         let targetSize = CGSize(width: dimensions.width, height: dimensions.height)
-        // Keep rotation independent from the user's zoom. Using the zero-angle
-        // base scale intentionally leaves black corners at arbitrary angles.
+        // Apply zoom while sampling the native camera image, before the final
+        // resize. This preserves source detail instead of magnifying an already
+        // downscaled Vision ROI.
         let baseScale = ImageRotation.minimumCoverScale(
             source: source.extent.size,
             target: targetSize,
             rotationDegrees: 0
         )
+        let zoomScale = CGFloat(min(10, max(1, zoom)))
         let transform = CGAffineTransform(
             translationX: targetSize.width / 2,
             y: targetSize.height / 2
         )
             .rotated(by: radians)
-            .scaledBy(x: baseScale, y: baseScale)
+            .scaledBy(x: baseScale * zoomScale, y: baseScale * zoomScale)
             .translatedBy(x: -source.extent.midX, y: -source.extent.midY)
         let processed = source.transformed(by: transform).cropped(
             to: CGRect(origin: .zero, size: targetSize)
         )
-        return (
-            VNImageRequestHandler(ciImage: processed, orientation: .up, options: [:]),
-            processed
+        return VisionInput(
+            handler: VNImageRequestHandler(ciImage: processed, orientation: .up, options: [:]),
+            regionOfInterest: NormalizedRegionGeometry.fullImage
         )
     }
 
-    private func makePreviewImage(
-        from processed: CIImage,
-        regionOfInterest: CGRect,
+    private func directVisionOrientation(
+        pixelBuffer: CVPixelBuffer,
+        rotation: Double,
         resolution: CaptureResolution
-    ) -> CGImage? {
-        let extent = processed.extent
-        guard extent.width > 0, extent.height > 0 else { return nil }
-        let roi = regionOfInterest.standardized.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
-        guard !roi.isEmpty else { return nil }
-        let crop = CGRect(
-            x: extent.minX + roi.minX * extent.width,
-            y: extent.minY + roi.minY * extent.height,
-            width: roi.width * extent.width,
-            height: roi.height * extent.height
-        )
-        var visible = processed.cropped(to: crop)
-        visible = visible.transformed(by: CGAffineTransform(
-            translationX: -crop.minX,
-            y: -crop.minY
-        ))
-        let dimensions = resolution.pixelDimensions
-        visible = visible.transformed(by: CGAffineTransform(
-            scaleX: CGFloat(dimensions.width) / crop.width,
-            y: CGFloat(dimensions.height) / crop.height
-        ))
-        let outputRect = CGRect(
-            x: 0,
-            y: 0,
-            width: dimensions.width,
-            height: dimensions.height
-        )
-        return previewContext.createCGImage(
-            visible,
-            from: outputRect,
-            format: .BGRA8,
-            colorSpace: previewColorSpace
-        )
+    ) -> CGImagePropertyOrientation? {
+        guard let turns = ImageRotation.discreteQuarterTurns(rotation) else { return nil }
+        let sourceWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let sourceHeight = CVPixelBufferGetHeight(pixelBuffer)
+        let target = resolution.pixelDimensions
+        let dimensionsMatch: Bool
+        if turns.isMultiple(of: 2) {
+            dimensionsMatch = sourceWidth == target.width && sourceHeight == target.height
+        } else {
+            dimensionsMatch = sourceWidth == target.height && sourceHeight == target.width
+        }
+        guard dimensionsMatch else { return nil }
+
+        switch turns {
+        case 0: return .up
+        case 1: return .right
+        case 2: return .down
+        case 3: return .left
+        default: return nil
+        }
     }
 
     private func checkCaptureHealth() {
@@ -1108,10 +1300,21 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         )
     }
 
+    private func configureVisionRequests(for settings: AppSettings) {
+        let prefersLowerResourceUse = settings.preset == .saver || settings.preset == .eco
+        handRequest.preferBackgroundProcessing = prefersLowerResourceUse
+        bodyRequest.preferBackgroundProcessing = prefersLowerResourceUse
+        faceRequest.preferBackgroundProcessing = prefersLowerResourceUse
+    }
+
     private func beginTrackingActivity() {
         guard trackingActivity == nil, trackingIntent.shouldRunCapture else { return }
+        var options: ProcessInfo.ActivityOptions = [.userInitiatedAllowingIdleSystemSleep]
+        if settings.preset == .smooth {
+            options.insert(.latencyCritical)
+        }
         trackingActivity = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            options: options,
             reason: "Continuous hand tracking and camera frame delivery"
         )
     }
@@ -1141,6 +1344,11 @@ final class TrackerController: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private func activeSlots(count: Int) -> [Int32] {
         let activeCount = max(0, count)
         return (0..<max(2, activeCount)).map { $0 < activeCount ? 1 : 0 }
+    }
+
+    private func exportedHandCount(_ detectionCount: Int) -> Int {
+        guard settings.trackingMode == .hands else { return 0 }
+        return min(OSCContract.handSlotCount, max(0, detectionCount))
     }
 
     private func fail(_ message: String) {

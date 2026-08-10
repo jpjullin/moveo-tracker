@@ -38,23 +38,24 @@ final class OSCSender {
         _ messages: [(address: String, arguments: [OSCArgument])],
         coalescingKey: String
     ) {
-        var payloads: [Data] = []
-        payloads.reserveCapacity(messages.count)
+        let batch = messages.map {
+            OSCMessage(address: $0.address, arguments: $0.arguments)
+        }
+        guard !batch.isEmpty else { return }
         do {
-            for message in messages {
-                payloads.append(try OSCEncoder.encodeMessage(
+            for message in batch {
+                try OSCEncoder.validateMessage(
                     address: message.address,
                     arguments: message.arguments
-                ))
+                )
             }
         } catch {
             report("OSC batch encode failed: \(error)")
             return
         }
-        guard !payloads.isEmpty else { return }
         queue.async { [weak self] in
             guard let self, !self.endpoint.isEmpty else { return }
-            self.enqueueOrSend(key: coalescingKey, payloads: payloads)
+            self.enqueueOrSend(key: coalescingKey, messages: batch)
         }
     }
 
@@ -169,12 +170,22 @@ final class OSCSender {
         queue.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
-    private func enqueueOrSend(key: String, payloads: [Data]) {
-        guard connection != nil, sendWindow.canSend(batchSize: payloads.count) else {
-            pendingBatches.store(key: key, payloads: payloads)
+    private func enqueueOrSend(key: String, messages: [OSCMessage]) {
+        guard connection != nil, sendWindow.canSend(batchSize: messages.count) else {
+            pendingBatches.store(key: key, messages: messages)
             return
         }
-        sendPayloads(payloads)
+        do {
+            sendPayloads(try encode(messages))
+        } catch {
+            report("OSC batch encode failed: \(error)")
+        }
+    }
+
+    private func encode(_ messages: [OSCMessage]) throws -> [Data] {
+        try messages.map {
+            try OSCEncoder.encodeMessage(address: $0.address, arguments: $0.arguments)
+        }
     }
 
     private func sendPayloads(_ payloads: [Data]) {
@@ -195,9 +206,13 @@ final class OSCSender {
     private func flushPendingBatches() {
         while let batch = pendingBatches.first,
               connection != nil,
-              sendWindow.canSend(batchSize: batch.payloads.count) {
+              sendWindow.canSend(batchSize: batch.messages.count) {
             _ = pendingBatches.removeFirst()
-            sendPayloads(batch.payloads)
+            do {
+                sendPayloads(try encode(batch.messages))
+            } catch {
+                report("OSC batch encode failed: \(error)")
+            }
         }
     }
 

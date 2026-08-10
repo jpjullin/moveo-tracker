@@ -27,7 +27,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     )
     private let presetPopup = NSPopUpButton()
     private let subjectsControl = NSSegmentedControl(
-        labels: ["1", "2", "Unlimited"],
+        labels: ["1", "2", "Up to 8"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -58,7 +58,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     private let processRAMValue = NSTextField(labelWithString: "Paused")
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let unlimitedHintLabel = NSTextField(
-        labelWithString: "Unlimited tracks every result and may use much more CPU."
+        labelWithString: "Up to eight subjects may use considerably more CPU."
     )
     private let previewView: CameraPreviewView
     private var previewAspectConstraint: NSLayoutConstraint?
@@ -139,7 +139,6 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     func updatePreviewOverlay(_ frame: PreviewOverlayFrame) {
         guard previewIsVisible else { return }
         updatePreviewAspectRatio(frame.sourceAspectRatio)
-        previewView.updateProcessedFrame(frame.image)
         previewView.updateDetections(frame.detections, sourceAspectRatio: frame.sourceAspectRatio)
     }
 
@@ -572,8 +571,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
         previewView.update(
             rotation: settings.rotation,
             zoom: settings.zoom,
-            resolution: settings.resolution,
-            clearsProcessedFrame: !latestStatus.isTracking
+            resolution: settings.resolution
         )
         updatePreviewAspectRatio()
 
@@ -615,14 +613,16 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
     }
 
     private func updateOSCAddresses() {
-        let slots = settings.isUnlimited ? "{0…}" : (settings.maxHands == 1 ? "0" : "{0,1}")
         let addresses: String
         switch settings.trackingMode {
         case .hands:
+            let slots = settings.maxHands == 1 ? "0" : "{0,1}"
             addresses = "/hand/\(slots)/landmarks   /hand/\(slots)/meta   /hands/active"
         case .body:
+            let slots = settings.isUnlimited ? "{0…7}" : (settings.maxHands == 1 ? "0" : "{0,1}")
             addresses = "/body/\(slots)/landmarks   /body/\(slots)/meta   /bodies/active"
         case .face:
+            let slots = settings.isUnlimited ? "{0…7}" : (settings.maxHands == 1 ? "0" : "{0,1}")
             addresses = "/face/\(slots)/landmarks   /face/\(slots)/bounds   /faces/active"
         }
         oscAddressesValue.stringValue = addresses
@@ -649,8 +649,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             previewView.update(
                 rotation: settings.rotation,
                 zoom: settings.zoom,
-                resolution: settings.resolution,
-                clearsProcessedFrame: !latestStatus.isTracking
+                resolution: settings.resolution
             )
             onSettingsChanged?(settings)
             return
@@ -662,8 +661,7 @@ final class MainWindowController: NSWindowController, NSTextFieldDelegate, NSWin
             previewView.update(
                 rotation: settings.rotation,
                 zoom: settings.zoom,
-                resolution: settings.resolution,
-                clearsProcessedFrame: !latestStatus.isTracking
+                resolution: settings.resolution
             )
             onSettingsChanged?(settings)
             return

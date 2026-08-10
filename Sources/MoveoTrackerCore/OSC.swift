@@ -13,8 +13,18 @@ public enum OSCEncodingError: Error, Equatable {
 }
 
 public enum OSCEncoder {
-    public static func encodeMessage(address: String, arguments: [OSCArgument]) throws -> Data {
+    public static func validateMessage(address: String, arguments: [OSCArgument]) throws {
         guard address.first == "/" else { throw OSCEncodingError.invalidAddress }
+        guard !address.utf8.contains(0) else { throw OSCEncodingError.embeddedNull }
+        for argument in arguments {
+            if case .string(let value) = argument, value.utf8.contains(0) {
+                throw OSCEncodingError.embeddedNull
+            }
+        }
+    }
+
+    public static func encodeMessage(address: String, arguments: [OSCArgument]) throws -> Data {
+        try validateMessage(address: address, arguments: arguments)
 
         var data = try encodeString(address)
         let tags = "," + arguments.map { argument in
@@ -54,6 +64,16 @@ public enum OSCEncoder {
 }
 
 public enum OSCContract {
+    public static let handSlotCount = 2
+    public static let handTrackingAddresses = [
+        "/hand/0/landmarks",
+        "/hand/0/meta",
+        "/hand/1/landmarks",
+        "/hand/1/meta",
+        "/hands/active",
+        "/tracking/status"
+    ]
+
     public static let addresses = [
         "/hand/0/landmarks",
         "/hand/0/meta",
@@ -72,6 +92,13 @@ public enum OSCContract {
         "/faces/active",
         "/tracking/status"
     ]
+
+    public static func handActiveArguments(handCount: Int) -> [OSCArgument] {
+        let activeCount = min(handSlotCount, max(0, handCount))
+        return (0..<handSlotCount).map { slot in
+            .int32(slot < activeCount ? 1 : 0)
+        }
+    }
 
     public static func landmarkArguments(_ landmarks: [NormalizedLandmark]) -> [OSCArgument] {
         landmarks.flatMap { point in
@@ -115,9 +142,19 @@ public enum OSCTransportErrorPolicy {
     }
 }
 
+public struct OSCMessage: Equatable, Sendable {
+    public let address: String
+    public let arguments: [OSCArgument]
+
+    public init(address: String, arguments: [OSCArgument]) {
+        self.address = address
+        self.arguments = arguments
+    }
+}
+
 public struct OSCBatchBuffer: Sendable {
     public let capacity: Int
-    private var batchesByKey: [String: [Data]] = [:]
+    private var batchesByKey: [String: [OSCMessage]] = [:]
     private var keyOrder: [String] = []
 
     public init(capacity: Int) {
@@ -126,13 +163,13 @@ public struct OSCBatchBuffer: Sendable {
 
     public var count: Int { keyOrder.count }
 
-    public var first: (key: String, payloads: [Data])? {
-        guard let key = keyOrder.first, let payloads = batchesByKey[key] else { return nil }
-        return (key, payloads)
+    public var first: (key: String, messages: [OSCMessage])? {
+        guard let key = keyOrder.first, let messages = batchesByKey[key] else { return nil }
+        return (key, messages)
     }
 
-    public mutating func store(key: String, payloads: [Data]) {
-        guard !key.isEmpty, !payloads.isEmpty else { return }
+    public mutating func store(key: String, messages: [OSCMessage]) {
+        guard !key.isEmpty, !messages.isEmpty else { return }
         if batchesByKey[key] == nil {
             if keyOrder.count >= capacity {
                 let droppedKey = keyOrder.removeFirst()
@@ -140,15 +177,15 @@ public struct OSCBatchBuffer: Sendable {
             }
             keyOrder.append(key)
         }
-        batchesByKey[key] = payloads
+        batchesByKey[key] = messages
     }
 
     @discardableResult
-    public mutating func removeFirst() -> (key: String, payloads: [Data])? {
+    public mutating func removeFirst() -> (key: String, messages: [OSCMessage])? {
         guard !keyOrder.isEmpty else { return nil }
         let key = keyOrder.removeFirst()
-        guard let payloads = batchesByKey.removeValue(forKey: key) else { return nil }
-        return (key, payloads)
+        guard let messages = batchesByKey.removeValue(forKey: key) else { return nil }
+        return (key, messages)
     }
 
     public mutating func removeAll(keepingCapacity: Bool = false) {
@@ -167,7 +204,11 @@ public struct OSCSendWindow: Sendable {
     }
 
     public func canSend(batchSize: Int) -> Bool {
-        batchSize > 0 && isReady && inFlight + batchSize <= maximumInFlight
+        guard batchSize > 0, isReady else { return false }
+        if batchSize > maximumInFlight {
+            return inFlight == 0
+        }
+        return inFlight + batchSize <= maximumInFlight
     }
 
     public mutating func setReady(_ ready: Bool) {

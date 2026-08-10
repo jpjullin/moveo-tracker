@@ -58,7 +58,6 @@ final class CameraPreviewView: NSView {
 
     private let viewportLayer = CALayer()
     private let previewLayer = AVCaptureVideoPreviewLayer()
-    private let processedFrameLayer = CALayer()
     private let resolutionBadge = ResolutionBadgeView(title: CaptureResolution.vga.displayName)
     private var overlayLayers: [OverlayLayers] = []
     private var displayedDetections: [PreviewDetection] = []
@@ -80,11 +79,6 @@ final class CameraPreviewView: NSView {
         viewportLayer.masksToBounds = true
         previewLayer.videoGravity = .resizeAspect
         viewportLayer.addSublayer(previewLayer)
-        processedFrameLayer.contentsGravity = .resizeAspectFill
-        processedFrameLayer.magnificationFilter = .nearest
-        processedFrameLayer.minificationFilter = .linear
-        processedFrameLayer.isHidden = true
-        viewportLayer.addSublayer(processedFrameLayer)
         ensureOverlayLayerCount(2)
         layer?.addSublayer(viewportLayer)
         resolutionBadge.translatesAutoresizingMaskIntoConstraints = false
@@ -109,7 +103,6 @@ final class CameraPreviewView: NSView {
         let sourceSize = CGSize(width: sourceAspectRatio * 1_000, height: 1_000)
         viewportLayer.frame = bounds
         viewportLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-        processedFrameLayer.frame = viewportLayer.bounds
         previewLayer.bounds = CGRect(origin: .zero, size: sourceSize)
         previewLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
         for layers in overlayLayers {
@@ -128,33 +121,19 @@ final class CameraPreviewView: NSView {
 
     func detach() {
         clearDetections()
-        updateProcessedFrame(nil)
         previewLayer.session = nil
     }
 
     func update(
         rotation: Double,
         zoom: Double,
-        resolution: CaptureResolution,
-        clearsProcessedFrame: Bool = true
+        resolution: CaptureResolution
     ) {
         rotationDegrees = ImageRotation.normalizedDegrees(rotation)
         self.zoom = min(10, max(1, zoom))
         sourceAspectRatio = resolution.aspectRatio
         resolutionBadge.title = resolution.displayName
-        if clearsProcessedFrame {
-            updateProcessedFrame(nil)
-        }
         needsLayout = true
-    }
-
-    func updateProcessedFrame(_ image: CGImage?) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        processedFrameLayer.contents = image
-        processedFrameLayer.isHidden = image == nil
-        previewLayer.isHidden = image != nil
-        CATransaction.commit()
     }
 
     func updateDetections(_ detections: [PreviewDetection], sourceAspectRatio: CGFloat) {

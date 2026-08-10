@@ -83,7 +83,7 @@ public enum CaptureResolution: String, Codable, CaseIterable, Sendable {
 
 public struct AppSettings: Codable, Equatable, Sendable {
     public static let unlimited = 0
-    public static let unlimitedHandRequestLimit = 64
+    public static let unlimitedHandRequestLimit = 8
 
     public var trackingMode: TrackingMode
     public var cameraID: String
@@ -185,7 +185,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     public var maximumDetectionCount: Int? {
-        isUnlimited ? nil : maxHands
+        isUnlimited ? Self.unlimitedHandRequestLimit : maxHands
     }
 
     public var maximumHandRequestCount: Int {

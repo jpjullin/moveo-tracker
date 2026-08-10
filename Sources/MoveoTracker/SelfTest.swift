@@ -72,8 +72,10 @@ enum CameraFreeSelfTest {
             failures.append("settings bounds are not enforced")
         }
         let unlimited = AppSettings(maxHands: AppSettings.unlimited)
-        if !unlimited.isUnlimited || unlimited.maximumDetectionCount != nil {
-            failures.append("unlimited detection setting is not preserved")
+        if !unlimited.isUnlimited ||
+            unlimited.maximumDetectionCount != 8 ||
+            unlimited.maximumHandRequestCount != 8 {
+            failures.append("up-to-eight detection setting is not preserved")
         }
 
         if failures.isEmpty {

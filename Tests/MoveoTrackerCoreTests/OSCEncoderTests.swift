@@ -10,6 +10,25 @@ final class OSCEncoderTests: XCTestCase {
         XCTAssertTrue(OSCContract.addresses.contains("/tracking/status"))
     }
 
+    func testHandTrackingAddressesMatchHandVisionNativeExactly() {
+        XCTAssertEqual(OSCContract.handTrackingAddresses, [
+            "/hand/0/landmarks",
+            "/hand/0/meta",
+            "/hand/1/landmarks",
+            "/hand/1/meta",
+            "/hands/active",
+            "/tracking/status"
+        ])
+    }
+
+    func testHandActiveContractAlwaysUsesTwoIntegerSlots() {
+        XCTAssertEqual(OSCContract.handActiveArguments(handCount: -1), [.int32(0), .int32(0)])
+        XCTAssertEqual(OSCContract.handActiveArguments(handCount: 0), [.int32(0), .int32(0)])
+        XCTAssertEqual(OSCContract.handActiveArguments(handCount: 1), [.int32(1), .int32(0)])
+        XCTAssertEqual(OSCContract.handActiveArguments(handCount: 2), [.int32(1), .int32(1)])
+        XCTAssertEqual(OSCContract.handActiveArguments(handCount: 8), [.int32(1), .int32(1)])
+    }
+
     func testHandsActivePacketUsesPaddedStringsAndBigEndianInts() throws {
         let packet = try OSCEncoder.encodeMessage(
             address: "/hands/active",
@@ -32,6 +51,10 @@ final class OSCEncoderTests: XCTestCase {
         let arguments = OSCContract.landmarkArguments(points)
 
         XCTAssertEqual(arguments.count, 63)
+        XCTAssertEqual(Array(arguments.prefix(6)), [
+            .float32(0), .float32(0.25), .float32(0),
+            .float32(0.05), .float32(0.25), .float32(0)
+        ])
         for index in stride(from: 2, to: arguments.count, by: 3) {
             XCTAssertEqual(arguments[index], .float32(0))
         }
@@ -103,19 +126,20 @@ final class OSCEncoderTests: XCTestCase {
 
     func testPendingOSCBatchesReplaceWholeFramesAndStayBounded() {
         var buffer = OSCBatchBuffer(capacity: 2)
-        let oldFrame = [Data([1]), Data([2]), Data([3])]
-        let newFrame = [Data([4]), Data([5]), Data([6])]
-        buffer.store(key: "tracking-frame", payloads: oldFrame)
-        buffer.store(key: "tracking-status", payloads: [Data([7])])
-        buffer.store(key: "tracking-frame", payloads: newFrame)
+        let oldFrame = [OSCMessage(address: "/frame", arguments: [.int32(1)])]
+        let newFrame = [OSCMessage(address: "/frame", arguments: [.int32(2)])]
+        let status = [OSCMessage(address: "/status", arguments: [.int32(1)])]
+        buffer.store(key: "tracking-frame", messages: oldFrame)
+        buffer.store(key: "tracking-status", messages: status)
+        buffer.store(key: "tracking-frame", messages: newFrame)
 
         XCTAssertEqual(buffer.count, 2)
-        XCTAssertEqual(buffer.removeFirst()?.payloads, newFrame)
-        XCTAssertEqual(buffer.removeFirst()?.payloads, [Data([7])])
+        XCTAssertEqual(buffer.removeFirst()?.messages, newFrame)
+        XCTAssertEqual(buffer.removeFirst()?.messages, status)
 
-        buffer.store(key: "one", payloads: [Data([1])])
-        buffer.store(key: "two", payloads: [Data([2])])
-        buffer.store(key: "three", payloads: [Data([3])])
+        buffer.store(key: "one", messages: oldFrame)
+        buffer.store(key: "two", messages: oldFrame)
+        buffer.store(key: "three", messages: oldFrame)
         XCTAssertEqual(buffer.count, 2)
         XCTAssertEqual(buffer.removeFirst()?.key, "two")
         XCTAssertEqual(buffer.removeFirst()?.key, "three")
@@ -139,5 +163,19 @@ final class OSCEncoderTests: XCTestCase {
         window.resetForNewConnection()
         XCTAssertEqual(window.inFlight, 0)
         XCTAssertFalse(window.isReady)
+    }
+
+    func testOSCSendWindowAllowsOneOversizedFrameWithoutStallingForever() {
+        var window = OSCSendWindow(maximumInFlight: 16)
+        window.setReady(true)
+
+        XCTAssertTrue(window.canSend(batchSize: 19))
+        window.recordSend(batchSize: 19)
+        XCTAssertEqual(window.inFlight, 19)
+        XCTAssertFalse(window.canSend(batchSize: 1))
+
+        for _ in 0..<19 { window.recordCompletion() }
+        XCTAssertEqual(window.inFlight, 0)
+        XCTAssertTrue(window.canSend(batchSize: 19))
     }
 }

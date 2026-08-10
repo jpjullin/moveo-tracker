@@ -62,13 +62,16 @@ final class JointOrderingTests: XCTestCase {
         XCTAssertEqual(settings.minimumConfidence, 0)
     }
 
-    func testUnlimitedDetectionLimitIsPreserved() {
-        var settings = AppSettings(maxHands: AppSettings.unlimited)
+    func testUpToEightDetectionLimitIsPreserved() {
+        var settings = AppSettings.defaults
+        settings.maxHands = AppSettings.unlimited
         settings.sanitize()
 
+        XCTAssertEqual(settings.maxHands, AppSettings.unlimited)
         XCTAssertTrue(settings.isUnlimited)
-        XCTAssertNil(settings.maximumDetectionCount)
-        XCTAssertEqual(settings.maximumHandRequestCount, AppSettings.unlimitedHandRequestLimit)
+        XCTAssertEqual(settings.maximumDetectionCount, 8)
+        XCTAssertEqual(AppSettings.unlimitedHandRequestLimit, 8)
+        XCTAssertEqual(settings.maximumHandRequestCount, 8)
 
         settings.updatePresetFromTuning()
         XCTAssertEqual(settings.preset, .custom)
