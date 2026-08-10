@@ -7,7 +7,10 @@ final class OSCSender {
     private var connection: NWConnection?
     private var reconnectWorkItem: DispatchWorkItem?
     private var endpoint = ""
-    private var sendWindow = OSCSendWindow(maximumInFlight: 16)
+    // Live control should favor the newest complete frame over draining stale
+    // frames. A single-batch window lets OSCBatchBuffer replace a pending
+    // tracking frame while preserving message order within the active batch.
+    private var sendWindow = OSCSendWindow(maximumInFlight: 1)
     private var pendingBatches = OSCBatchBuffer(capacity: 16)
 
     var onError: ((String) -> Void)?

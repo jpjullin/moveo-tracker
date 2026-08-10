@@ -181,4 +181,18 @@ final class OSCEncoderTests: XCTestCase {
         XCTAssertEqual(window.inFlight, 0)
         XCTAssertTrue(window.canSend(batchSize: 19))
     }
+
+    func testSingleBatchSendWindowDoesNotQueueOverlappingTrackingFrames() {
+        var window = OSCSendWindow(maximumInFlight: 1)
+        window.setReady(true)
+
+        XCTAssertTrue(window.canSend(batchSize: 3))
+        window.recordSend(batchSize: 3)
+        XCTAssertFalse(window.canSend(batchSize: 3))
+        XCTAssertFalse(window.canSend(batchSize: 1))
+
+        for _ in 0..<3 { window.recordCompletion() }
+        XCTAssertEqual(window.inFlight, 0)
+        XCTAssertTrue(window.canSend(batchSize: 3))
+    }
 }
