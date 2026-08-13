@@ -233,8 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func hideWindow() {
         mainWindowController.window?.orderOut(nil)
         // Return from the click event first so AppKit can commit the visual hide.
-        // Detaching AVCaptureVideoPreviewLayer can synchronously wait on
-        // AVFoundation and must not delay the window disappearing.
+        // Suspending the preview connection must not delay the window disappearing.
         DispatchQueue.main.async { [weak self] in
             self?.mainWindowController.updatePreviewVisibility()
         }
