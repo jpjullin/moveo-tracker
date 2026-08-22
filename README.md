@@ -2,6 +2,10 @@
 
 Apple Vision hand, body, and face tracking to OSC for macOS.
 
+[![Moveo Tracker tracking hands, body, and face](media/moveo-tracker-demo.jpg)](media/moveo-tracker-demo.mp4)
+
+[Watch the 9-second demo.](media/moveo-tracker-demo.mp4)
+
 ## Use
 
 1. [Download the latest release](https://github.com/jpjullin/moveo-tracker/releases/latest).
